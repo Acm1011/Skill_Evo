@@ -1,0 +1,1 @@
+{"data_source": "AMC23", "model": "Qwen2.5-Math-7B", "rule@first": "42.50", "rule_mean@1": "42.50", "checked_sample_mean@1": "42.50", "checked@first": "42.50", "checked_mean@1": "42.50", "n_samples": 1, "temperature": 0.0}

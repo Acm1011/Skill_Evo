@@ -1,0 +1,10 @@
+{
+  "model_name": "ttrl_Qwen2.5-Math-1.5B_MATH500_bsz32_epoch10-step60",
+  "model_path": "/home/ycy/data3/ttrl_saved/Solver_ttrl_Base/ttrl_Qwen2.5-Math-1.5B_MATH500_bsz32_epoch10/ckpts/global_step_60/actor/huggingface",
+  "dataset": "greedy_data",
+  "step": 60,
+  "n_samples": 1,
+  "temperature": 0.0,
+  "max_gen_len": 4096,
+  "num_examples": 2805
+}

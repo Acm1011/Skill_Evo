@@ -1,0 +1,28 @@
+{
+  "dataset": "mmlupro",
+  "model": "data_OlympiadBench_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V13",
+  "model_path": "/home/ycy/data3/ttrl_saved/Solver_ttrl/data_OlympiadBench_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V13/ckpts/global_step_10/actor/huggingface",
+  "micro_accuracy": 21.86,
+  "macro_accuracy": 20.79,
+  "success": 263,
+  "fail": 940,
+  "total": 1203,
+  "sample_ratio": 0.1,
+  "total_filtered": 0,
+  "per_category_accuracy": {
+    "computer science": 0.21951219512195122,
+    "math": 0.4295774647887324,
+    "chemistry": 0.26548672566371684,
+    "engineering": 0.15625,
+    "law": 0.07272727272727272,
+    "biology": 0.22535211267605634,
+    "health": 0.1111111111111111,
+    "physics": 0.24031007751937986,
+    "business": 0.32051282051282054,
+    "philosophy": 0.20408163265306123,
+    "economics": 0.23809523809523808,
+    "other": 0.13043478260869565,
+    "psychology": 0.13924050632911392,
+    "history": 0.15789473684210525
+  }
+}

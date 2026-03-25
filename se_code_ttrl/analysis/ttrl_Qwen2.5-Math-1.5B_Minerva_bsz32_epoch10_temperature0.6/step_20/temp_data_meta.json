@@ -1,0 +1,10 @@
+{
+  "model_name": "ttrl_Qwen2.5-Math-1.5B_Minerva_bsz32_epoch10-step20",
+  "model_path": "/home/ycy/data3/ttrl_saved/Solver_ttrl_Base/ttrl_Qwen2.5-Math-1.5B_Minerva_bsz32_epoch10/ckpts/global_step_20/actor/huggingface",
+  "dataset": "temp_data",
+  "step": 20,
+  "n_samples": 32,
+  "temperature": 0.6,
+  "max_gen_len": 4096,
+  "num_examples": 60
+}

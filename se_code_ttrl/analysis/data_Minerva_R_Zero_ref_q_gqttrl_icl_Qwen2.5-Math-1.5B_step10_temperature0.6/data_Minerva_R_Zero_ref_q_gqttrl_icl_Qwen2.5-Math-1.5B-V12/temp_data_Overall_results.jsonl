@@ -1,0 +1,2 @@
+{"data_source": "AIME24", "model": "data_Minerva_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V12", "rule@first": "10.00", "rule_mean@32": "10.52", "checked_sample_mean@32": "10.52", "checked@first": "10.00", "checked_mean@32": "10.52", "n_samples": 32, "temperature": 0.6}
+{"data_source": "AIME25", "model": "data_Minerva_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V12", "rule@first": "13.33", "rule_mean@32": "7.50", "checked_sample_mean@32": "7.50", "checked@first": "13.33", "checked_mean@32": "7.50", "n_samples": 32, "temperature": 0.6}

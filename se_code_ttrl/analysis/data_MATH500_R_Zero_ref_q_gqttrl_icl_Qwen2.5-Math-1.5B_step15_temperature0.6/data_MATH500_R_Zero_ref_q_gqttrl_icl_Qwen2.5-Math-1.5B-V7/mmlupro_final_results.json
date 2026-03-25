@@ -1,0 +1,28 @@
+{
+  "dataset": "mmlupro",
+  "model": "data_MATH500_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V7",
+  "model_path": "/home/ycy/ttrl_saved/Solver_ttrl/data_MATH500_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V7/ckpts/global_step_15/actor/huggingface",
+  "micro_accuracy": 25.19,
+  "macro_accuracy": 23.95,
+  "success": 303,
+  "fail": 900,
+  "total": 1203,
+  "sample_ratio": 0.1,
+  "total_filtered": 0,
+  "per_category_accuracy": {
+    "computer science": 0.24390243902439024,
+    "math": 0.39436619718309857,
+    "chemistry": 0.30973451327433627,
+    "engineering": 0.14583333333333334,
+    "law": 0.11818181818181818,
+    "biology": 0.3380281690140845,
+    "health": 0.13580246913580246,
+    "physics": 0.26356589147286824,
+    "business": 0.358974358974359,
+    "philosophy": 0.14285714285714285,
+    "economics": 0.39285714285714285,
+    "other": 0.16304347826086957,
+    "psychology": 0.24050632911392406,
+    "history": 0.10526315789473684
+  }
+}

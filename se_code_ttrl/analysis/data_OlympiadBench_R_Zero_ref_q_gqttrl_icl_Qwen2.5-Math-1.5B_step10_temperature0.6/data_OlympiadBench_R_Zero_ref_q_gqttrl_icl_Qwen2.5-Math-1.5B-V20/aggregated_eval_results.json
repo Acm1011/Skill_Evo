@@ -1,0 +1,92 @@
+{
+  "model_name": "data_OlympiadBench_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V20",
+  "model_path": "/home/ycy/data3/ttrl_saved/Solver_ttrl/data_OlympiadBench_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V20/ckpts/global_step_10/actor/huggingface",
+  "datasets": {
+    "bbeh": {
+      "dataset": "bbeh",
+      "accuracy": 3.98,
+      "macro_accuracy": null,
+      "success": 18,
+      "fail": 434,
+      "total": 452,
+      "per_category_accuracy": {
+        "boardgame_qa": 0.05,
+        "boolean_expressions": 0.014492753623188406,
+        "buggy_tables": 0.0,
+        "causal_understanding": 0.35,
+        "disambiguation_qa": 0.08333333333333333,
+        "dyck_languages": 0.0,
+        "geometric_shapes": 0.05,
+        "hyperbaton": 0.0,
+        "linguini": 0.0,
+        "movie_recommendation": 0.15,
+        "multistep_arithmetic": 0.0,
+        "nycc": 0.05,
+        "object_counting": 0.0,
+        "object_properties": 0.0,
+        "sarc_triples": 0.1,
+        "shuffled_objects": 0.0,
+        "spatial_reasoning": 0.0,
+        "sportqa": 0.05,
+        "temporal_sequence": 0.0,
+        "time_arithmetic": 0.0,
+        "web_of_lies": 0.0,
+        "word_sorting": 0.0,
+        "zebra_puzzles": 0.0
+      }
+    },
+    "mmlupro": {
+      "dataset": "mmlupro",
+      "accuracy": 23.28,
+      "macro_accuracy": 21.5,
+      "success": 280,
+      "fail": 923,
+      "total": 1203,
+      "per_category_accuracy": {
+        "computer science": 0.24390243902439024,
+        "math": 0.4225352112676056,
+        "chemistry": 0.30973451327433627,
+        "engineering": 0.15625,
+        "law": 0.11818181818181818,
+        "biology": 0.23943661971830985,
+        "health": 0.1111111111111111,
+        "physics": 0.32558139534883723,
+        "business": 0.2564102564102564,
+        "philosophy": 0.14285714285714285,
+        "economics": 0.2261904761904762,
+        "other": 0.17391304347826086,
+        "psychology": 0.1518987341772152,
+        "history": 0.13157894736842105
+      }
+    },
+    "supergpqa": {
+      "dataset": "supergpqa",
+      "accuracy": 14.86,
+      "macro_accuracy": null,
+      "success": 394,
+      "fail": 2258,
+      "total": 2652,
+      "per_category_accuracy": {
+        "Engineering": 0.1432192648922687,
+        "Medicine": 0.10909090909090909,
+        "Science": 0.15587044534412955,
+        "Philosophy": 0.23529411764705882,
+        "Military Science": 0.2,
+        "Economics": 0.1839080459770115,
+        "Management": 0.24,
+        "Sociology": 0.07142857142857142,
+        "Literature and Arts": 0.12574850299401197,
+        "History": 0.14925373134328357,
+        "Agronomy": 0.08333333333333333,
+        "Law": 0.2,
+        "Education": 0.16666666666666666
+      }
+    }
+  },
+  "overall": {
+    "total_success": 692,
+    "total_fail": 3615,
+    "total_samples": 4307,
+    "overall_accuracy": 16.07
+  }
+}

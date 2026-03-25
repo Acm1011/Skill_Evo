@@ -1,0 +1,11 @@
+{
+  "reference_question": "A list of positive integers has the following properties:\n\n\\bullet The sum of the items in the list is 30.\n\n\\bullet The unique mode of the list is 9.\n\n\\bullet The median of the list is a positive integer that does not appear in the list itself.\n\nFind the sum of the squares of all the items in the list.",
+  "description": "这个案例展示了模型如何从简单的列表问题逐步生成更复杂的变体",
+  "complexity_trend": "V1 → V5 → V10 → V15: 问题从简单的列表约束逐渐扩展到更复杂的组合和几何结构",
+  "evolution": {
+    "V1": "The list $\\{a_1, a_2, a_3, \\ldots, a_n\\}$ consists of positive integers such that their sum is 30 and their unique mode is 9. Additionally, the median is a positive integer not in the list, and the maximum value among the integers in the list is 9. Determine the sum of the squares of all the integers in the list.",
+    "V5": "On the coordinate plane, consider the set of $15$ lattice points $P=\\{(x,y)\\in \\mathbb{Z}^2:\\ 0\\le x\\le 4,\\ 0\\le y\\le 2\\}$. A subset $S\\subseteq P$ is chosen uniformly at random. Let $R(S)$ be the smallest axis-parallel rectangle containing $S$. The probability that $S\\neq\\varnothing$ and the upper-right vertex of $R(S)$ is $(4,2)$ is $\\frac{m}{n}$ in lowest terms. Find $m+n$.",
+    "V10": "Consider the set of positive integers $S$ such that the sum of the elements is 30. Let the mode of this set be $m$ and the median be $n$, with $m > n$. If $m$ is the smallest possible integer that can serve as the mode of a set summing to 30, and $n$ is the largest possible integer that can serve as the median under the same condition, find the value of $m+n$.",
+    "V15": "Let $a_1, a_2, \\dots, a_{100}$ be positive real numbers such that\n\\begin{align*}\n\\log_{a_1} a_2 + \\log_{a_2} a_3 + &\\dots + \\log_{a_{99}} a_{100} + \\log_{a_{100}} a_1 = 2004, \\\\\n\\log_{a_1} a_3 + \\log_{a_2} a_4 + &\\dots + \\log_{a_{99}} a_1 + \\log_{a_{100}} a_2 = 1995, \\\\\n&\\vdots \\\\\n\\log_{a_1} a_{100} + \\log_{a_2} a_1 + &\\dots + \\log_{a_{99}} a_{98} + \\log_{a_{100}} a_{99} = 1906.\n\\end{align*}Let $x$ be the smallest possible value of $\\log_{a_1} a_2 + \\log_{a_2} a_3 + \\dots + \\log_{a_{99}} a_{100} + \\log_{a_{100}} a_1,$ and let $y$ be the largest possible value of $\\log_{a_1} a_3 + \\log_{a_2} a_4 + \\dots + \\log_{a_{99}} a_1 + \\log_{a_{100}} a_2.$ Find $x+y.$"
+  }
+}

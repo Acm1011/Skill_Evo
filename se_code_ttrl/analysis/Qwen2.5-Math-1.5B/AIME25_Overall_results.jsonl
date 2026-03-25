@@ -1,0 +1,1 @@
+{"data_source": "AIME25", "model": "Qwen2.5-Math-1.5B", "rule@first": "0.00", "rule_mean@32": "0.94", "checked_sample_mean@32": "2.08", "checked@first": "3.33", "checked_mean@32": "2.08", "n_samples": 32, "temperature": 0.6}

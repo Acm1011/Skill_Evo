@@ -1,0 +1,26 @@
+{
+  "dataset": "supergpqa",
+  "model": "Qwen2.5-Math-1.5B",
+  "model_path": "/home/ycy/data1/models/Qwen2.5-Math-1.5B",
+  "step": null,
+  "accuracy": 13.52,
+  "success": 358,
+  "fail": 2289,
+  "total": 2647,
+  "sample_ratio": 0.1,
+  "per_category_accuracy": {
+    "Engineering": 0.13814955640050697,
+    "Medicine": 0.1709090909090909,
+    "Science": 0.13224821973550355,
+    "Philosophy": 0.14705882352941177,
+    "Military Science": 0.05,
+    "Economics": 0.13793103448275862,
+    "Management": 0.08,
+    "Sociology": 0.21428571428571427,
+    "Literature and Arts": 0.16167664670658682,
+    "History": 0.07462686567164178,
+    "Agronomy": 0.10416666666666667,
+    "Law": 0.046153846153846156,
+    "Education": 0.14583333333333334
+  }
+}

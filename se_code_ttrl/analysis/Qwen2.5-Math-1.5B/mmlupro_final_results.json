@@ -1,0 +1,28 @@
+{
+  "dataset": "mmlupro",
+  "model": "Qwen2.5-Math-1.5B",
+  "model_path": "/home/ycy/data1/models/Qwen2.5-Math-1.5B",
+  "step": null,
+  "micro_accuracy": 16.22,
+  "macro_accuracy": 16.06,
+  "success": 194,
+  "fail": 1002,
+  "total": 1196,
+  "sample_ratio": 0.1,
+  "per_category_accuracy": {
+    "computer science": 0.14634146341463414,
+    "math": 0.2518518518518518,
+    "chemistry": 0.168141592920354,
+    "engineering": 0.13541666666666666,
+    "law": 0.06363636363636363,
+    "biology": 0.2112676056338028,
+    "health": 0.1111111111111111,
+    "physics": 0.21705426356589147,
+    "business": 0.23076923076923078,
+    "philosophy": 0.14285714285714285,
+    "economics": 0.11904761904761904,
+    "other": 0.07608695652173914,
+    "psychology": 0.16455696202531644,
+    "history": 0.21052631578947367
+  }
+}

@@ -1,0 +1,65 @@
+\section{Case Study}
+\label{sec:case_study}
+
+% 定义高亮颜色
+\definecolor{evolve1}{RGB}{65, 105, 225}   % 蓝色 - 结构变化
+\definecolor{evolve2}{RGB}{220, 20, 60}    % 红色 - 难度提升
+\definecolor{evolve3}{RGB}{34, 139, 34}    % 绿色 - 领域迁移
+\definecolor{evolve4}{RGB}{148, 0, 211}    % 紫色 - 复杂度增加
+
+To qualitatively demonstrate how our self-evolving framework progressively improves question synthesis quality, we present two representative cases from AIME24. For each case, we track the synthesized questions across training iterations (Iter 1, 5, 10, and 15), highlighting the evolution in problem structure and complexity.
+
+We use color coding to indicate different types of evolution patterns observed in the synthesized questions:
+\begin{itemize}
+    \item \textcolor{evolve1}{\textbf{Blue (Structure Change)}}: Modifications to problem parameters, variables, or mathematical objects while preserving the core solution approach.
+    \item \textcolor{evolve2}{\textbf{Red (Difficulty Increase)}}: Introduction of additional constraints, more complex conditions, or harder computational requirements.
+    \item \textcolor{evolve3}{\textbf{Green (Domain Transfer)}}: Shift to different mathematical domains (e.g., from algebra to geometry, from discrete to continuous).
+    \item \textcolor{evolve4}{\textbf{Purple (Complexity Growth)}}: Increase in structural complexity, such as nested functions, multi-step reasoning, or advanced mathematical concepts.
+\end{itemize}
+
+As shown in Table~\ref{tab:evolution_cases}, the model demonstrates increasing sophistication in question synthesis as training progresses. In early iterations, the synthesized questions tend to be simpler variations or direct modifications of the reference. By later iterations, the model generates questions that exhibit domain transfer, increased structural complexity, and novel problem formulations while maintaining mathematical validity.
+
+{\small
+\begin{longtable}{p{1.5cm}p{7cm}p{7cm}}
+\caption{Evolution of synthesized questions across training iterations. Two representative cases from AIME24 are shown, demonstrating how our self-evolving framework progressively improves question synthesis quality.}
+\label{tab:evolution_cases} \\
+\toprule
+\textbf{Iteration} & \textbf{Case 1: Function Intersection} & \textbf{Case 2: Roots of Unity} \\
+\midrule
+\endfirsthead
+\caption[]{(Continued) Evolution of synthesized questions across training iterations.} \\
+\toprule
+\textbf{Iteration} & \textbf{Case 1: Function Intersection} & \textbf{Case 2: Roots of Unity} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\bottomrule
+\endlastfoot
+
+\textbf{Test Question (AIME24)} & 
+Define $f(x)=|| x|-\tfrac{1}{2}|$ and $g(x)=|| x|-\tfrac{1}{4}|$. Find the number of intersections of the graphs of $y=4 g(f(\sin (2 \pi x)))$ and $x=4 g(f(\cos (3 \pi y)))$. &
+Let $\omega \neq 1$ be a 13th root of unity. Find the remainder when $\prod_{k=0}^{12}(2 - 2\omega^k + \omega^{2k})$ is divided by 1000. \\
+\midrule
+
+\textbf{Iter 1} & 
+Find the number of \textcolor{evolve3}{\textbf{integer solutions}} $(x,y)$ to the equation \textcolor{evolve1}{\textbf{$4x^2-16y^2+14x-24y+9=0$}}. &
+The polynomial \textcolor{evolve1}{\textbf{$f(x)=x^3+x^2-x-1$}} has three distinct roots, $p$, $q$, and $r$. What is $p^3q^3+r^3q^3+p^3r^3$? \\
+\midrule
+
+\textbf{Iter 5} & 
+How many points $(x,y)$ lie at intersections between the graphs of \textcolor{evolve2}{\textbf{$x=|\sin(\pi y)|$}} and \textcolor{evolve2}{\textbf{$y=|\sin(\pi x)|$}}? &
+Find the sum of all \textcolor{evolve3}{\textbf{complex numbers}} $w$ such that the real part of $w$ is greater than 0 and \textcolor{evolve2}{\textbf{$w^3 + (4 - \frac{58}{7}i)w^2 - (6 + 13i)w + 10 = 0$}}. \\
+\midrule
+
+\textbf{Iter 10} & 
+Find the number of points where the graphs of \textcolor{evolve4}{\textbf{$y=|x+1|+|x-1|$}} and \textcolor{evolve4}{\textbf{$y=|2x-1|+|3x-2|$}} intersect. &
+Let $\omega \neq 1$ be a 13th root of unity. Compute the remainder when \textcolor{evolve1}{\textbf{$\sum_{n=0}^{12} \omega^n$}} is divided by 1000. \\
+\midrule
+
+\textbf{Iter 15} & 
+Find the sum of the $x$-coordinates of the points where the graph of \textcolor{evolve4}{\textbf{$f(x)=\sin^{-1}\left(\frac{3x-x^3}{1+2x^2}\right)$}} intersects the line $y=\frac{\pi}{4}$, for \textcolor{evolve2}{\textbf{$-\sqrt{2} \leq x \leq \sqrt{2}$}}. &
+Let $N$ be the number of \textcolor{evolve3}{\textbf{ordered triples}} $(a, b, c)$ of positive integers such that \textcolor{evolve4}{\textbf{$a^2 + b^2 + c^2 = 2025$}}. Find $N$ modulo 1000. \\
+
+\end{longtable}
+}

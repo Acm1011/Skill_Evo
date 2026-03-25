@@ -1,0 +1,17 @@
+Your task is to generate a new math question based on the following inputs.
+You must strictly follow the two-step process defined in your System Prompt:
+- First, perform the full INTERNAL ANALYSIS (STEP 1).
+- Then, generate the final question (STEP 2) exactly as specified.
+
+You must also obey the following key constraints:
+- You must generate exactly ONE single question; do NOT include any subparts such as “(a)”, “(b)”, etc.
+- The question must NOT be a proof-type problem; do NOT use phrases like “prove that”, “show that”, “justify that”, or similar.
+- The question must have exactly ONE correct final answer, which is a specific, verifiable numerical value or algebraic expression.
+
+---
+### 1. Topic Profile
+{TOPIC_PROFILE}
+
+---
+### 2. Target Difficulty Level
+{TARGET_DIFFICULTY}

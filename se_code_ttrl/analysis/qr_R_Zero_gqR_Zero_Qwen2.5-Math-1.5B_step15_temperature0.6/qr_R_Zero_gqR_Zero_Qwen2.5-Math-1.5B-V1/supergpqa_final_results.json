@@ -1,0 +1,26 @@
+{
+  "dataset": "supergpqa",
+  "model": "qr_R_Zero_gqR_Zero_Qwen2.5-Math-1.5B-V1",
+  "model_path": "/home/ycy/data1/saved_results/Solver/qr_R_Zero_gqR_Zero_Qwen2.5-Math-1.5B-V1/ckpts/global_step_15/actor/huggingface",
+  "accuracy": 11.35,
+  "success": 301,
+  "fail": 2351,
+  "total": 2652,
+  "sample_ratio": 0.1,
+  "total_filtered": 28,
+  "per_category_accuracy": {
+    "Engineering": 0.12167300380228137,
+    "Medicine": 0.12,
+    "Science": 0.11133603238866396,
+    "Philosophy": 0.058823529411764705,
+    "Military Science": 0.15,
+    "Economics": 0.11494252873563218,
+    "Management": 0.06,
+    "Sociology": 0.07142857142857142,
+    "Literature and Arts": 0.11377245508982035,
+    "History": 0.1044776119402985,
+    "Agronomy": 0.10416666666666667,
+    "Law": 0.15384615384615385,
+    "Education": 0.041666666666666664
+  }
+}

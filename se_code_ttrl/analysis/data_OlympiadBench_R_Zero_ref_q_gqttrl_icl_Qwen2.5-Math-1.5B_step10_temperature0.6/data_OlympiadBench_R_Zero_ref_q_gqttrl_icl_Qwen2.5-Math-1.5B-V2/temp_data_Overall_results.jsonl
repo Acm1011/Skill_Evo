@@ -1,0 +1,2 @@
+{"data_source": "AIME24", "model": "data_OlympiadBench_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V2", "rule@first": "6.67", "rule_mean@32": "8.13", "checked_sample_mean@32": "8.85", "checked@first": "6.67", "checked_mean@32": "8.85", "n_samples": 32, "temperature": 0.6}
+{"data_source": "AIME25", "model": "data_OlympiadBench_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V2", "rule@first": "6.67", "rule_mean@32": "3.65", "checked_sample_mean@32": "5.00", "checked@first": "6.67", "checked_mean@32": "5.00", "n_samples": 32, "temperature": 0.6}

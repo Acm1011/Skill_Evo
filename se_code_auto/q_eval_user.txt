@@ -1,0 +1,94 @@
+--------------------------------
+INPUT
+--------------------------------
+Question:
+{QUESTION}
+
+--------------------------------
+EVALUATION CHECKLIST (INTERNAL USE ONLY)
+--------------------------------
+
+Use the following checklist to guide your internal evaluation.  
+You must NOT expose any per-criterion scores or verbal explanations in your output.
+
+1. Mathematical Truthfulness & Internal Consistency  
+   - Check if all given equations, relationships, and conditions are mathematically correct and realistic.  
+   - Look for contradictions, impossible constraints, or obviously false “given” statements.  
+   - Consider whether the structure makes sense (no undefined symbols, no impossible equalities, no nonsense data).
+
+   Internal scale (for your reasoning only):
+   - 4 = Fully consistent and correct; no serious issues.  
+   - 3 = Generally correct; at most minor or subtle issues.  
+   - 2 = Some questionable or imprecise parts, but the main problem is still mostly salvageable.  
+   - 1 = Serious doubts about correctness or feasibility.  
+   - 0 = Clearly incorrect or self-contradictory; not mathematically valid as stated.
+
+2. Difficulty & Depth of Reasoning  
+   - Assume the target audience is **advanced high-school students preparing for math contests**.  
+   - Higher scores should correspond to **harder** problems that require **nontrivial insight**.  
+   - Check whether the solution requires at least one clever or non-standard step (e.g., smart substitution, invariants, symmetry, bounding, non-obvious case split, etc.), beyond routine plugging or standard formulas.  
+   - If the problem is trivial, straightforward plug-and-chug, or purely formula-based, the difficulty score should be low.
+
+   Internal scale (for your reasoning only):
+   - 4 = Very challenging; significantly fewer than ~25% of strong contest students would solve it; clearly requires deep insight.  
+   - 3 = Solid contest-level; nontrivial and requires some insight, but still accessible to many well-trained students.  
+   - 2 = Moderate; requires some thought but closer to a difficult textbook exercise than to a true contest problem.  
+   - 1 = Mostly routine; can be solved by straightforward standard methods.  
+   - 0 = Trivial or nearly trivial.
+
+3. Well-posedness & Answer Uniqueness  
+   - Check whether the question is clearly asking for a well-defined object:  
+     - a specific number, expression, or a clearly described finite set of solutions.  
+   - Verify that, under the stated conditions, it is reasonable to expect **essentially one correct answer** (or one clearly specified finite set).  
+   - Make sure important domains (real, integer, positive, etc.) and constraints are specified so that the solution set is not ambiguous.
+
+   Internal scale (for your reasoning only):
+   - 1 = Well-posed with essentially unique answer; no important ambiguity.  
+   - 0 = Ill-posed, ambiguous, or likely to have multiple essentially different answers.
+
+4. Clarity & Practical Solvability (Minor Factor)  
+   - Is the problem statement understandable and self-contained?  
+   - Are all variables and objects defined clearly enough for a good student to attempt it?  
+   - Is it realistically solvable with advanced high-school knowledge (no need for university-level tools like advanced calculus, linear algebra, or measure theory)?
+
+   Internal scale (for your reasoning only):
+   - 1 = Clear and self-contained; realistically solvable.  
+   - 0 = Noticeable issues with clarity or missing definitions; or requires tools far beyond high-school contest level.
+
+--------------------------------
+SCORING RULE (INTERNAL)
+--------------------------------
+
+Internally, you may assign scores to the four criteria as:
+
+- Truthfulness & Consistency (T): 0–4  
+- Difficulty & Depth (D): 0–4  
+- Well-posedness & Uniqueness (W): 0–1  
+- Clarity & Practical Solvability (C): 0–1  
+
+Then compute the overall score as:
+
+- **overall_score = T + D + W + C**
+
+Thus:
+- The final score is an integer between **0 and 10** (inclusive).  
+- Higher scores mean the question is both **more mathematically sound** and **more challenging/insightful**.
+
+You must keep T, D, W, C, and all reasoning strictly internal and never output them.
+
+--------------------------------
+OUTPUT FORMAT (STRICT)
+--------------------------------
+
+Your entire external response MUST be a single valid JSON object with **only one key**, and nothing else:
+
+{
+  "score": <integer from 0 to 10>
+}
+
+Requirements:
+- `score` MUST be an integer from 0 to 10 (inclusive).
+- Do NOT output any other keys, comments, text, or formatting.
+- Do NOT wrap the JSON in code fences or backticks.
+- Do NOT output explanations, reasoning, or partial solutions.
+- The JSON object must be the ONLY content in your response.

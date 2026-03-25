@@ -1,0 +1,102 @@
+Level <1
+Jamie counted the number of edges of a cube, Jimmy counted the number of corners, and Judy counted the number of faces. They then added the three numbers. What was the resulting sum?
+
+Level 1
+How many integer values of $x$ satisfy $\lvert x \rvert < 3\pi$?
+
+Level 1.5
+A number is called flippy if its digits alternate between two distinct digits. For example, $2020$ and $37373$ are flippy, but $3883$ and $123123$ are not. How many five-digit flippy numbers are divisible by $15$?
+
+Level 2
+A fair $6$-sided die is repeatedly rolled until an odd number appears. What is the probability that every even number appears at least once before the first occurrence of an odd number?
+
+Level 2.5
+Let $A,B,C$ be three piles of rocks. The mean weight of the rocks in $A$ is $40$ pounds, the mean weight of the rocks in $B$ is $50$ pounds, the mean weight of the rocks  in the combined piles $A$ and $B$ is $43$ pounds, and the mean  weight of the rocks in the combined piles $A$ and $C$ is $44$ pounds. What is the greatest possible integer value for the mean in pounds of the rocks in the combined piles $B$ and $C$?
+
+Level 3
+Triangle $ABC$ with $AB=50$ and $AC=10$ has area $120$. Let $D$ be the midpoint of $\overline{AB}$, and let $E$ be the midpoint of $\overline{AC}$. The angle bisector of $\angle BAC$ intersects $\overline{DE}$ and $\overline{BC}$ at $F$ and $G$, respectively. What is the area of quadrilateral $FDBG$?
+
+Level 3.5
+Find the number of integer values of $k$ in the closed interval $[-500,500]$ for which the equation $log(kx)=2\log(x+2)$ has exactly one real solution.
+
+Level 4
+Define a sequence recursively by $x_0=5$ and
+$$
+x_{n+1}=\frac{x_n^2+5x_n+4}{x_n+6}
+$$
+for all nonnegative integers $n$. Let $m$ be the least positive integer such that
+$$
+x_m \le 4+\frac{1}{2^{20}}.
+$$
+In which of the following intervals does $m$ lie?
+$$
+\text{(A) }[9,26]\quad
+\text{(B) }[27,80]\quad
+\text{(C) }[81,242]\quad
+\text{(D) }[243,728]\quad
+\text{(E) }[729,\infty)
+$$
+
+Level 4.5
+Find, with proof, all positive integers $n$ for which $2^n+12^n+2011^n$ is a perfect square.
+
+Level 5
+Find all triples $(a,b,c)$ of real numbers such that the following system holds:
+$$
+a+b+c=\frac{1}{a}+\frac{1}{b}+\frac{1}{c},
+$$
+$$
+a^2+b^2+c^2=\frac{1}{a^2}+\frac{1}{b^2}+\frac{1}{c^2}.
+$$
+
+Level 5.5
+Triangle $ABC$ has $\angle BAC=60^\circ$, $\angle CBA\le 90^\circ$, $BC=1$, and $AC\ge AB$. Let $H$, $I$, and $O$ be the orthocenter, incenter, and circumcenter of $\triangle ABC$, respectively. Assume that the area of pentagon $BCOIH$ is the maximum possible. What is $\angle CBA$?
+
+Level 6
+Let $\triangle ABC$ be an acute triangle with circumcircle $\omega$, and let $H$ be the intersection of the altitudes of $\triangle ABC$. Suppose the tangent to the circumcircle of $\triangle HBC$ at $H$ intersects $\omega$ at points $X$ and $Y$ with $HA=3$, $HX=2$, and $HY=6$. The area of $\triangle ABC$ can be written in the form $m\sqrt{n}$, where $m$ and $n$ are positive integers, and $n$ is not divisible by the square of any prime. Find $m+n$.
+
+Level 6.5
+Rectangles $BCC_1B_2$, $CAA_1C_2$, and $ABB_1A_2$ are erected outside an acute triangle $ABC$. Suppose that
+$$
+\angle BC_1C+\angle CA_1A+\angle AB_1B=180^\circ.
+$$
+Prove that lines $B_1C_2$, $C_1A_2$, and $A_1B_2$ are concurrent.
+
+Level 7
+We say that a finite set $S$ in the plane is called \emph{balanced} if, for any two different points $A,B$ in $S$, there is a point $C$ in $S$ such that $AC=BC$. The set $S$ is \emph{centre-free} if, for any three points $A,B,C$ in $S$, there is no point $P$ in $S$ such that $PA=PB=PC$.
+\begin{enumerate}
+\item a. Show that for all integers $n\ge 3$, there exists a balanced set consisting of $n$ points.
+\item b. Determine all integers $n\ge 3$ for which there exists a balanced centre-free set consisting of $n$ points.
+\end{enumerate}
+
+Level 7.5
+Let $\mathbb{Z}$ be the set of integers. Find all functions $f:\mathbb{Z}\to\mathbb{Z}$ such that
+$$
+xf\!\bigl(2f(y)-x\bigr)+y^2 f\!\bigl(2x-f(y)\bigr)=\frac{f(x)^2}{x}+f\!\bigl(yf(y)\bigr)
+$$
+for all $x,y \in \mathbb{Z}$ with $x\ne 0$.
+
+Level 8
+For each positive integer $n$, the Bank of Cape Town issues coins of denomination $\tfrac{1}{n}$. Given a finite collection of such coins (of not necessarily different denominations) with total value at most $99+\tfrac{1}{2}$, prove that it is possible to split this collection into $100$ or fewer groups, such that each group has total value at most $1$.
+
+Level 8.5
+Let $I$ be the incenter of acute triangle $ABC$ with $AB\ne AC$. The incircle $\omega$ of $ABC$ is tangent to sides $BC$, $CA$, and $AB$ at $D$, $E$, and $F$, respectively. The line through $D$ perpendicular to $EF$ meets $\omega$ at $R$. Line $AR$ meets $\omega$ again at $P$. The circumcircles of triangles $PCE$ and $PBF$ meet again at $Q$. Prove that lines $DI$ and $PQ$ meet on the line through $A$ perpendicular to $AI$.
+
+Level 9
+Let $k$ be a positive integer and let $S$ be a finite set of odd prime numbers. Prove that there is at most one way (up to rotation and reflection) to place the elements of $S$ around a circle such that the product of any two neighbors is of the form $x^2+x+k$ for some positive integer $x$.
+
+Level 9.5
+An \emph{anti-Pascal triangle} is an equilateral triangular array of numbers such that, except for the numbers in the bottom row, each number is the absolute value of the difference of the two numbers immediately below it. For example, the following is an anti-Pascal triangle with four rows which contains every integer from $1$ to $10$.
+\[
+\begin{tabular}{ccccccc}
+ & & & 4 & & & \\
+ & & 2 & & 6 & & \\
+ & 5 & & 7 & & 1 & \\
+8 & & 3 & & 10 & & 9
+\end{tabular}
+\]
+Does there exist an anti-Pascal triangle with $2018$ rows which contains every integer from $1$ to $1 + 2 + 3 + \dots + 2018$?
+
+Level 10
+Prove that there exists a positive constant $c$ such that the following statement is true: Consider an integer $n > 1$, and a set $\mathcal S$ of $n$ points in the plane such that the distance between any two different points in $\mathcal S$ is at least 1. It follows that there is a line $\ell$ separating $\mathcal S$ such that the distance from any point of $\mathcal S$ to $\ell$ is at least $cn^{-1/3}$.
+(A line $\ell$ separates a set of points S if some segment joining two points in $\mathcal S$ crosses $\ell$.)

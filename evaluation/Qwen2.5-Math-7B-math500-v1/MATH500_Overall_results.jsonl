@@ -1,0 +1,1 @@
+{"data_source": "MATH500", "model": "Qwen2.5-Math-7B-math500-v1", "rule@first": "83.80", "rule_mean@1": "83.80", "checked_sample_mean@1": "84.20", "checked@first": "84.20", "checked_mean@1": "84.20", "n_samples": 1, "temperature": 0.0}
