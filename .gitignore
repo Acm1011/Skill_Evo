@@ -132,3 +132,9 @@ logs
 log
 outputs
 .history
+
+
+# skill_zero
+skill_zero/runs/
+skill_zero/logs/
+skill_zero/datas/
