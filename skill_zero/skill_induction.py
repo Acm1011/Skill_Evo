@@ -7,23 +7,26 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import tempfile
-import urllib.error
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 from tqdm import tqdm
 
 from eval import is_rollout_correct
-from prompts import prompt_skill_induction
+from prompts import prompt_skill_induction, prompt_skill_induction_v2
 
 SKILL_KEYS = ("skill name", "problem type", "key insight", "method")
+PROMPT_VERSION_V1 = "v1"
+PROMPT_VERSION_V2 = "v2"
 SKILL_FROM_SUCCESS = "success_rollout"
 SKILL_FROM_FAIL = "fail_rollout"
-SKILL_FROM_MIXED = "混合成功和失败轨迹"
+SKILL_FROM_MIXED = "success_and_fail_rollout"
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -156,6 +159,60 @@ def _pack_trajectories(sampled: list[tuple[int, str, bool]]) -> str:
     return "\n\n".join(lines)
 
 
+def _parse_v2_skill(raw: str) -> tuple[Optional[dict], Optional[str]]:
+    """解析 v2 prompt 输出的 WHEN...IF...THEN... 格式，返回 {"problem_type": ..., "skill_body": ...}。"""
+    text = raw.strip()
+    # 提取第一行有内容的行作为 skill_body（去除多余空行）
+    lines = [l for l in text.splitlines() if l.strip()]
+    if not lines:
+        return None, "empty model output"
+    skill_body = lines[0].strip()
+    # 从 skill_body 中提取 WHEN 后面的内容作为 problem_type
+    m = re.match(r"(?i)WHEN\s+([^.]+)\.", skill_body)
+    if m:
+        problem_type = m.group(1).strip()
+    else:
+        # 降级：取整个 skill_body 前 80 个字符
+        problem_type = skill_body[:80]
+    return {"problem_type": problem_type, "skill_body": skill_body}, None
+
+
+def _build_skill_body_v1(parsed: dict) -> str:
+    """将 v1 JSON 的字段拼成可读文本，作为统一的 skill_body。"""
+    parts = []
+    for k in SKILL_KEYS:
+        v = parsed.get(k)
+        if v is not None and str(v).strip():
+            parts.append(f"{k}: {v}")
+    return "\n".join(parts)
+
+
+def _make_empty_row(
+    qid: Any,
+    problem: str,
+    use_v2: bool,
+    skill_from: Optional[str] = None,
+    parse_error: Optional[str] = None,
+    sampled_indices: Optional[list] = None,
+    raw_model_output: Optional[str] = None,
+) -> dict:
+    """统一构建空 row，v1 保留原始字段，v1/v2 均写入 problem_type 和 skill_body。"""
+    row: dict = {
+        "problem_type": None,
+        "skill_body": None,
+        "skill_from": skill_from,
+        "id": qid,
+        "problem": problem,
+        "sampled_rollout_indices": sampled_indices or [],
+        "parse_error": parse_error,
+        "raw_model_output": raw_model_output,
+    }
+    if not use_v2:
+        for k in SKILL_KEYS:
+            row[k] = None
+    return row
+
+
 def _parse_model_json(raw: str) -> tuple[Optional[dict], Optional[str]]:
     s = raw.strip()
     if s.startswith("```"):
@@ -170,35 +227,31 @@ def _parse_model_json(raw: str) -> tuple[Optional[dict], Optional[str]]:
         return None, str(e)
 
 
-def _post_generate(base_url: str, body: dict, timeout: float) -> dict:
-    url = base_url.rstrip("/") + "/generate"
-    payload = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def _chat_generate(
+    client: OpenAI,
+    model: str,
+    messages: list[ChatCompletionMessageParam],
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    timeout: float,
+) -> tuple[str, Optional[str]]:
+    extra_body = {"top_k": top_k} if top_k > 0 else None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        try:
-            return json.loads(err_body)
-        except json.JSONDecodeError:
-            return {"error": err_body or str(e)}
-
-
-def _parse_text_response(data: dict) -> str:
-    if "error" in data:
-        return ""
-    t = data.get("text")
-    if isinstance(t, str):
-        return t
-    if isinstance(t, list) and t:
-        return str(t[0])
-    return ""
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            n=1,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            extra_body=extra_body,
+            timeout=timeout,
+        )
+        return resp.choices[0].message.content or "", None
+    except Exception as e:
+        return "", str(e)
 
 
 def main() -> None:
@@ -214,6 +267,18 @@ def main() -> None:
         type=str,
         default="http://127.0.0.1:5000",
     )
+    parser.add_argument(
+        "--api_key",
+        type=str,
+        default="EMPTY",
+        help="vllm serve 的 --api-key，未设置则填任意非空字符串。",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="served-model-name，默认从 /v1/models 自动获取第一个。",
+    )
     parser.add_argument("--k", type=int, default=4, help="Sample k trajectories per question.")
     parser.add_argument(
         "--output_root",
@@ -226,6 +291,14 @@ def main() -> None:
     parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--top_k", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--prompt_version",
+        type=str,
+        choices=(PROMPT_VERSION_V1, PROMPT_VERSION_V2),
+        default=PROMPT_VERSION_V1,
+        help="使用的技能归纳 prompt 版本：v1 输出 JSON（skill name/problem type/key insight/method），"
+             "v2 输出 WHEN...IF...THEN... 纯文本规则。",
+    )
     parser.add_argument(
         "--system",
         type=str,
@@ -253,6 +326,19 @@ def main() -> None:
         print("[skill_induction] no rows", file=sys.stderr)
         sys.exit(1)
 
+    base_url = args.server.rstrip("/") + "/v1"
+    client = OpenAI(base_url=base_url, api_key=args.api_key)
+
+    model_name = args.model
+    if not model_name:
+        try:
+            models = client.models.list()
+            model_name = models.data[0].id
+            print(f"[skill_induction] 自动获取模型名: {model_name}", file=sys.stderr)
+        except Exception as e:
+            print(f"[skill_induction] 无法获取模型列表: {e}", file=sys.stderr)
+            sys.exit(1)
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     stem = roll_path.stem
     out_dir = args.output_root.resolve() / stem
@@ -275,18 +361,19 @@ def main() -> None:
         file=sys.stderr,
     )
 
-    health_url = args.server.rstrip("/") + "/health"
     try:
-        with urllib.request.urlopen(health_url, timeout=10.0) as r:
-            if r.status != 200:
-                print(
-                    f"[skill_induction] health check HTTP {r.status}",
-                    file=sys.stderr,
-                )
+        client.models.list()
+        print(f"[skill_induction] 服务连通: {base_url}", file=sys.stderr)
     except Exception as e:
-        print(f"[skill_induction] health check failed: {e}", file=sys.stderr)
+        print(f"[skill_induction] 服务连通检查失败: {e}", file=sys.stderr)
 
     rng = random.Random(args.seed)
+    use_prompt_v2 = args.prompt_version == PROMPT_VERSION_V2
+    prompt_template = prompt_skill_induction_v2 if use_prompt_v2 else prompt_skill_induction
+    print(
+        f"[skill_induction] 使用 prompt_version={args.prompt_version}",
+        file=sys.stderr,
+    )
     records_out: list[dict] = []
     n_parse_fail = 0
     n_api_fail = 0
@@ -306,22 +393,15 @@ def main() -> None:
         qid = rec.get("id")
         problem = rec.get("problem", "")
         gold = rec.get("answer")
+        if rec.get("rollouts") is None:
+            n_skip += 1
+            continue
         success, fail = _collect_labeled_rollouts(rec, gold)
         sampled = _stratified_sample_k(success, fail, args.k, rng)
         if not sampled:
             n_skip += 1
-            row = {
-                "skill name": None,
-                "problem type": None,
-                "key insight": None,
-                "method": None,
-                "skill_from": None,
-                "id": qid,
-                "problem": problem,
-                "sampled_rollout_indices": [],
-                "parse_error": "no_non_empty_rollouts",
-                "raw_model_output": None,
-            }
+            row = _make_empty_row(qid, problem, use_prompt_v2, skill_from=None,
+                                  parse_error="no_non_empty_rollouts")
             records_out.append(row)
             _atomic_write_jsonl(skills_path, records_out)
             pbar.set_postfix(
@@ -334,7 +414,7 @@ def main() -> None:
 
         skill_from = _skill_from_label(sampled)
         traj_block = _pack_trajectories(sampled)
-        user_prompt = prompt_skill_induction.format(
+        user_prompt = prompt_template.format(
             question=problem, trajectories=traj_block
         )
         n_succ = sum(1 for x in sampled if x[2])
@@ -353,38 +433,26 @@ def main() -> None:
             f"skill_from={skill_from!r} …",
             file=sys.stderr,
         )
-        body = {
-            "messages": [
-                {"role": "system", "content": args.system},
-                {"role": "user", "content": user_prompt},
-            ],
-            "n": 1,
-            "max_tokens": args.max_tokens,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "top_k": args.top_k,
-        }
-        resp = _post_generate(args.server, body, args.request_timeout)
-        raw = _parse_text_response(resp)
-        if resp.get("error"):
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": args.system},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw, api_err = _chat_generate(
+            client=client,
+            model=model_name,
+            messages=messages,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            timeout=args.request_timeout,
+        )
+        if api_err:
             n_api_fail += 1
-            err = (
-                resp["error"]
-                if isinstance(resp["error"], str)
-                else json.dumps(resp["error"], ensure_ascii=False)
-            )
-            row = {
-                "skill name": None,
-                "problem type": None,
-                "key insight": None,
-                "method": None,
-                "skill_from": skill_from,
-                "id": qid,
-                "problem": problem,
-                "sampled_rollout_indices": [x[0] for x in sampled],
-                "parse_error": f"api_error: {err}",
-                "raw_model_output": raw or None,
-            }
+            row = _make_empty_row(qid, problem, use_prompt_v2, skill_from=skill_from,
+                                  parse_error=f"api_error: {api_err}",
+                                  sampled_indices=[x[0] for x in sampled],
+                                  raw_model_output=raw or None)
             records_out.append(row)
             _atomic_write_jsonl(skills_path, records_out)
             pbar.set_postfix(
@@ -395,26 +463,28 @@ def main() -> None:
             )
             continue
 
-        parsed, perr = _parse_model_json(raw)
+        if use_prompt_v2:
+            parsed, perr = _parse_v2_skill(raw)
+        else:
+            parsed, perr = _parse_model_json(raw)
         if perr:
             n_parse_fail += 1
         else:
             n_json_ok += 1
-        row = {
-            "skill name": None,
-            "problem type": None,
-            "key insight": None,
-            "method": None,
-            "skill_from": skill_from,
-            "id": qid,
-            "problem": problem,
-            "sampled_rollout_indices": [x[0] for x in sampled],
-            "parse_error": perr,
-            "raw_model_output": raw if perr else None,
-        }
+
+        row = _make_empty_row(qid, problem, use_prompt_v2, skill_from=skill_from,
+                              sampled_indices=[x[0] for x in sampled],
+                              parse_error=perr,
+                              raw_model_output=raw if perr else None)
         if parsed:
-            for key in SKILL_KEYS:
-                row[key] = parsed.get(key)
+            if use_prompt_v2:
+                row["problem_type"] = parsed.get("problem_type")
+                row["skill_body"] = parsed.get("skill_body")
+            else:
+                for key in SKILL_KEYS:
+                    row[key] = parsed.get(key)
+                row["problem_type"] = parsed.get("problem type")
+                row["skill_body"] = _build_skill_body_v1(parsed)
         records_out.append(row)
         _atomic_write_jsonl(skills_path, records_out)
         pbar.set_postfix(
@@ -432,6 +502,7 @@ def main() -> None:
         "server": args.server,
         "k": args.k,
         "seed": args.seed,
+        "prompt_version": args.prompt_version,
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,

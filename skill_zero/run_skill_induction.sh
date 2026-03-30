@@ -21,8 +21,11 @@ cd "$SCRIPT_DIR"
 PYTHON="${PYTHON:-python3}"
 PORT="${PORT:-5000}"
 SERVER="http://127.0.0.1:${PORT}"
+API_KEY="${API_KEY:-EMPTY}"
+SKILL_MODEL="${SKILL_MODEL:-}"
+PROMPT_VERSION="${PROMPT_VERSION:-v2}"
 
-ROLLOUTS_JSONL="${ROLLOUTS_JSONL:-runs/rollout/AIME-24/20260324_113909_059596/rollouts.jsonl}"
+ROLLOUTS_JSONL="${ROLLOUTS_JSONL:-runs/rollout_api/deepscaler/20260327_225407_154236/rollouts.jsonl}"
 SKILL_K="${SKILL_K:-4}"
 SKILL_OUTPUT_ROOT="${SKILL_OUTPUT_ROOT:-runs/skill_induction}"
 SKILL_RUN_LABEL="${SKILL_RUN_LABEL:-}"
@@ -37,14 +40,19 @@ CMD=(
   "$PYTHON" skill_induction.py
   --rollouts_jsonl "$ROLLOUTS_JSONL"
   --server "$SERVER"
+  --api_key "$API_KEY"
   --k "$SKILL_K"
   --output_root "$SKILL_OUTPUT_ROOT"
   --seed "$SKILL_SEED"
   --max_tokens "$SKILL_MAX_TOKENS"
   --temperature "$SKILL_TEMPERATURE"
   --top_p "$SKILL_TOP_P"
+  --prompt_version "$PROMPT_VERSION"
   --request_timeout "$SKILL_REQUEST_TIMEOUT"
 )
+if [ -n "$SKILL_MODEL" ]; then
+  CMD+=(--model "$SKILL_MODEL")
+fi
 if [ -n "$SKILL_RUN_LABEL" ]; then
   CMD+=(--run_label "$SKILL_RUN_LABEL")
 fi

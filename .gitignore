@@ -138,3 +138,4 @@ outputs
 skill_zero/runs/
 skill_zero/logs/
 skill_zero/datas/
+skill_zero/memory_manager/test_results

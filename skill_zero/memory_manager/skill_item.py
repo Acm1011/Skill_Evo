@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 # JSON 键名与 skill_induction 产出的 skills.jsonl 一致
@@ -15,10 +15,11 @@ JSON_KEY_METHOD = "method"
 JSON_KEY_SKILL_FROM = "skill_from"
 JSON_KEY_ID = "id"
 JSON_KEY_PROBLEM = "problem"
-JSON_KEY_SAMPLED_ROLLOUT_INDICES = "sampled_rollout_indices"
-JSON_KEY_PARSE_ERROR = "parse_error"
-JSON_KEY_RAW_MODEL_OUTPUT = "raw_model_output"
 JSON_KEY_UTILITY = "utility"
+JSON_KEY_USAGE_SUCCESS = "skill_usage_success"
+JSON_KEY_USAGE_FAILURE = "skill_usage_failure"
+# 外部传入时允许使用 reward 作为 utility 的别名
+JSON_KEY_REWARD_ALIAS = "reward"
 
 
 @dataclass
@@ -30,13 +31,12 @@ class SkillItem:
     skill_from: str
     id: str
     problem: str
-    sampled_rollout_indices: list[int] = field(default_factory=list)
-    parse_error: str | None = None
-    raw_model_output: str | None = None
     utility: float = 0.0
+    skill_usage_success: int = 0
+    skill_usage_failure: int = 0
 
     def to_json_dict(self) -> dict[str, Any]:
-        """序列化为与 skills.jsonl 一致的键名；utility 作为扩展字段。"""
+        """序列化为与 skills.jsonl 一致的键名；utility / usage 作为扩展字段。"""
         return {
             JSON_KEY_SKILL_NAME: self.skill_name,
             JSON_KEY_PROBLEM_TYPE: self.problem_type,
@@ -45,37 +45,48 @@ class SkillItem:
             JSON_KEY_SKILL_FROM: self.skill_from,
             JSON_KEY_ID: self.id,
             JSON_KEY_PROBLEM: self.problem,
-            JSON_KEY_SAMPLED_ROLLOUT_INDICES: list(self.sampled_rollout_indices),
-            JSON_KEY_PARSE_ERROR: self.parse_error,
-            JSON_KEY_RAW_MODEL_OUTPUT: self.raw_model_output,
             JSON_KEY_UTILITY: self.utility,
+            JSON_KEY_USAGE_SUCCESS: self.skill_usage_success,
+            JSON_KEY_USAGE_FAILURE: self.skill_usage_failure,
         }
 
     @classmethod
-    def from_json_dict(cls, d: dict[str, Any]) -> SkillItem:
-        """从 jsonl 行反序列化；缺失 utility 时默认为 0.0。"""
-        indices = d.get(JSON_KEY_SAMPLED_ROLLOUT_INDICES) or []
-        if not isinstance(indices, list):
-            indices = []
-        else:
-            indices = [int(x) for x in indices]
-        util = d.get(JSON_KEY_UTILITY, 0.0)
-        if util is None:
+    def from_json_dict(cls, d: dict[str, Any], *, assigned_id: str = "") -> SkillItem:
+        """从 jsonl 行或外部 payload 反序列化。
+
+        - ``utility`` 优先；若缺失则回退到 ``reward`` 字段（外部传入时的别名）；仍缺失默认 0.0。
+        - ``assigned_id`` 非空时覆盖 d 中的 id 字段，用于服务端自动分配 id 的场景。
+        - ``skill_usage_success`` / ``skill_usage_failure`` 缺失时默认为 0。
+        """
+        util_raw = d.get(JSON_KEY_UTILITY)
+        if util_raw is None:
+            util_raw = d.get(JSON_KEY_REWARD_ALIAS, 0.0)
+        try:
+            util = float(util_raw) if util_raw is not None else 0.0
+        except (TypeError, ValueError):
             util = 0.0
-        else:
-            util = float(util)
+
+        try:
+            usage_success = int(d.get(JSON_KEY_USAGE_SUCCESS, 0) or 0)
+        except (TypeError, ValueError):
+            usage_success = 0
+        try:
+            usage_failure = int(d.get(JSON_KEY_USAGE_FAILURE, 0) or 0)
+        except (TypeError, ValueError):
+            usage_failure = 0
+
+        raw_id = assigned_id if assigned_id else str(d.get(JSON_KEY_ID, ""))
         return cls(
             skill_name=str(d.get(JSON_KEY_SKILL_NAME, "")),
             problem_type=str(d.get(JSON_KEY_PROBLEM_TYPE, "")),
             key_insight=str(d.get(JSON_KEY_KEY_INSIGHT, "")),
             method=str(d.get(JSON_KEY_METHOD, "")),
             skill_from=str(d.get(JSON_KEY_SKILL_FROM, "")),
-            id=str(d.get(JSON_KEY_ID, "")),
+            id=raw_id,
             problem=str(d.get(JSON_KEY_PROBLEM, "")),
-            sampled_rollout_indices=indices,
-            parse_error=d.get(JSON_KEY_PARSE_ERROR),
-            raw_model_output=d.get(JSON_KEY_RAW_MODEL_OUTPUT),
             utility=util,
+            skill_usage_success=usage_success,
+            skill_usage_failure=usage_failure,
         )
 
     @classmethod

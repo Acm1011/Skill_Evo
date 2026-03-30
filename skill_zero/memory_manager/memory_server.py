@@ -19,7 +19,7 @@ except ImportError as e:
     ) from e
 
 from .skill_item import SkillItem
-from .skill_manager import DEFAULT_EMBEDDING_MODEL, SkillManager
+from .skill_manager import DEFAULT_RETRIEVER_URL, SkillManager
 from .skill_memory import SkillMemoryDuplicateIdError, SkillMemoryFullError
 from .retrieval import RetrieveMode
 
@@ -35,27 +35,37 @@ def _get_manager() -> SkillManager:
     return _manager
 
 
-def _parse_skill_payload(data: dict[str, Any]) -> SkillItem:
+def _parse_skill_payload(data: dict[str, Any], *, assigned_id: str = "") -> SkillItem:
     """
     支持两种结构：
     1) 整份即为 jsonl 风格字段（含 \"skill name\" 等）；
     2) {\"skill\": { ... }} 内层同上。
+
+    ``assigned_id`` 非空时会覆盖 payload 中的 id 字段。
+    ``reward`` 字段会被自动映射为 ``utility``（在 SkillItem.from_json_dict 中处理）。
     """
     if "skill" in data and isinstance(data["skill"], dict):
         raw = data["skill"]
     else:
         raw = data
-    return SkillItem.from_json_dict(raw)
+    return SkillItem.from_json_dict(raw, assigned_id=assigned_id)
 
 
 @app.get("/health")
 def health():
     m = _get_manager()
-    ready = m.embedding_loaded
+    # 查询 retriever_server 状态（不报错，仅标记）
+    retriever_ok = False
+    try:
+        rh = m.retriever_health()
+        retriever_ok = bool(rh.get("model_loaded"))
+    except Exception:
+        pass
     return jsonify(
         {
             "ok": True,
-            "embedding_ready": ready,
+            "retriever_ready": retriever_ok,
+            "retriever_url": m.retriever_url,
             "current_size": m.current_size(),
             "max_capacity": m.get_max_capacity(),
         }
@@ -88,7 +98,16 @@ def retrieve():
     return jsonify(
         {
             "ok": True,
-            "skills": [it.to_json_dict() for it in items],
+            "skills": [
+                {
+                    "id": it.id,
+                    "skill name": it.skill_name,
+                    "problem type": it.problem_type,
+                    "key insight": it.key_insight,
+                    "method": it.method,
+                }
+                for it in items
+            ],
             "count": len(items),
         }
     )
@@ -96,27 +115,176 @@ def retrieve():
 
 @app.post("/add")
 def add():
-    """JSON: 与 skills.jsonl 同结构的字段，或 {\"skill\": { ... }}。"""
+    """添加一条 skill 到内存并持久化到默认 jsonl 文件。
+
+    请求体为 JSON 对象，支持以下两种结构：
+    - 直接字段（推荐）：包含 ``skill name``、``problem type``、``key insight``、
+      ``method``、``skill_from``、``problem``、``reward``（或 ``utility``）。
+    - 嵌套结构：``{"skill": { ...上述字段... }}``。
+
+    服务端行为：
+    - ``id`` 字段由服务端自动分配（自增整数字符串），忽略请求体中的 ``id``。
+    - ``reward`` 字段自动映射为内部 ``utility``；若同时存在 ``utility`` 则优先使用 ``utility``。
+    - 主库已满时自动降级到警告区；警告区满时先淘汰最低 utility 的 skill。
+    - add 成功后将该条记录追加写入默认持久化 jsonl 文件。
+
+    返回：``{"ok": true, "id": "<id>", "zone": "main"|"warning", "evicted_id": str|null, "persist_path": str}``
+    """
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "JSON object required"}), 400
-    try:
-        item = _parse_skill_payload(body)
-    except (TypeError, KeyError, ValueError) as e:
-        return jsonify({"ok": False, "error": f"invalid skill payload: {e}"}), 400
-    if not item.id:
-        return jsonify({"ok": False, "error": "skill 'id' is required"}), 400
+
+    raw = body.get("skill", body) if isinstance(body.get("skill"), dict) else body
+    required_keys = {"skill name", "problem type", "key insight", "method", "skill_from", "problem"}
+    missing = required_keys - set(raw.keys())
+    if missing:
+        return jsonify({"ok": False, "error": f"missing required fields: {sorted(missing)}"}), 400
+    if "reward" not in raw and "utility" not in raw:
+        return jsonify({"ok": False, "error": "missing required field: 'reward' or 'utility'"}), 400
 
     m = _get_manager()
     try:
         with _manager_lock:
-            m.add(item)
-    except SkillMemoryDuplicateIdError as e:
-        return jsonify({"ok": False, "error": str(e)}), 409
-    except SkillMemoryFullError as e:
-        return jsonify({"ok": False, "error": str(e)}), 507
+            new_id = m.allocate_id()
+            try:
+                item = _parse_skill_payload(body, assigned_id=new_id)
+            except (TypeError, KeyError, ValueError) as e:
+                return jsonify({"ok": False, "error": f"invalid skill payload: {e}"}), 400
 
-    return jsonify({"ok": True, "id": item.id})
+            evict_info = m.add_with_eviction(item)
+
+            try:
+                saved_path = m.append_to_jsonl(item)
+            except OSError as e:
+                return jsonify({
+                    "ok": False,
+                    "error": f"skill added to memory but failed to persist: {e}",
+                    "id": item.id,
+                }), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    return jsonify({
+        "ok": True,
+        "id": item.id,
+        "zone": evict_info["zone"],
+        "evicted_id": evict_info["evicted_id"],
+        "persist_path": str(saved_path),
+    })
+
+
+def _compute_new_utility(
+    utility: float,
+    R: float,
+    is_success: bool,
+    lam: float = 0.9,
+    tau: float = 0.2,
+    u_min: float = 0.0,
+    u_max: float = 1.0,
+) -> tuple[float, bool]:
+    """计算 EMA 更新后的 utility。
+
+    Returns:
+        (new_utility, changed) — changed 表示 effective_reward > 0 时才实际更新。
+    """
+    effective_reward = max(0.0, abs(R) - tau)
+    if effective_reward == 0.0:
+        return utility, False
+    alpha = 1.0 - lam
+    sign = 1.0 if is_success else -1.0
+    delta = sign * effective_reward
+    new_val = utility + alpha * delta
+    new_val = max(u_min, min(u_max, new_val))
+    return new_val, True
+
+
+# utility 更新超参（可通过命令行 --update-lam 等覆盖）
+_UPDATE_LAM: float = 0.9
+_UPDATE_TAU: float = 0.2
+_UPDATE_U_MIN: float = 0.0
+_UPDATE_U_MAX: float = 1.0
+
+
+@app.post("/update")
+def update():
+    """批量更新 skill 的 utility。
+
+    请求体：``{"skills": [{"id": str, "is_success": bool, "reward": float}, ...]}``
+
+    返回：每条条目的处理结果列表。
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "JSON object required"}), 400
+
+    skills_raw = body.get("skills")
+    if not isinstance(skills_raw, list) or len(skills_raw) == 0:
+        return jsonify({"ok": False, "error": "'skills' must be a non-empty list"}), 400
+
+    m = _get_manager()
+    results = []
+
+    with _manager_lock:
+        for idx, entry in enumerate(skills_raw):
+            if not isinstance(entry, dict):
+                results.append({"index": idx, "ok": False, "error": "entry must be a JSON object"})
+                continue
+
+            skill_id = entry.get("id")
+            is_success = entry.get("is_success")
+            reward_raw = entry.get("reward")
+
+            if not isinstance(skill_id, str) or not skill_id:
+                results.append({"index": idx, "ok": False, "error": "missing or empty 'id'"})
+                continue
+            if not isinstance(is_success, bool):
+                results.append({"index": idx, "id": skill_id, "ok": False, "error": "'is_success' must be bool"})
+                continue
+            if reward_raw is None:
+                results.append({"index": idx, "id": skill_id, "ok": False, "error": "missing 'reward'"})
+                continue
+            try:
+                reward = float(reward_raw)
+            except (TypeError, ValueError):
+                results.append({"index": idx, "id": skill_id, "ok": False, "error": "'reward' must be a number"})
+                continue
+
+            item, zone = m.get_by_id_any(skill_id)
+            if item is None:
+                results.append({"index": idx, "id": skill_id, "ok": False, "error": "skill not found"})
+                continue
+
+            new_utility, _ = _compute_new_utility(
+                item.utility, reward, is_success,
+                lam=_UPDATE_LAM, tau=_UPDATE_TAU, u_min=_UPDATE_U_MIN, u_max=_UPDATE_U_MAX,
+            )
+
+            try:
+                zone_result = m.update_with_zone_logic(
+                    skill_id, is_success, new_utility, old_utility=item.utility
+                )
+            except Exception as e:
+                results.append({"index": idx, "id": skill_id, "ok": False, "error": str(e)})
+                continue
+
+            results.append({
+                "index": idx,
+                "id": skill_id,
+                "ok": True,
+                **zone_result,
+            })
+
+        # 批量处理完后全量持久化一次（覆盖写），确保 utility / 使用计数不丢失
+        try:
+            m.save_jsonl()
+        except OSError as e:
+            return jsonify({
+                "ok": False,
+                "error": f"update applied to memory but failed to persist: {e}",
+                "results": results,
+            }), 500
+
+    return jsonify({"ok": True, "results": results})
 
 
 @app.post("/manage")
@@ -143,9 +311,21 @@ def manage():
                         "current_size": m.current_size(),
                         "max_capacity": m.get_max_capacity(),
                         "is_full": m.is_full(),
+                        "warn_size": m.warn_zone_size(),
+                        "warn_capacity": m.warn_zone_capacity(),
                         "retrieve_mode": m.retrieve_mode.value,
                         "retrieve_lambda": m.retrieve_lambda,
-                        "embedding_model_name": m.embedding_model_name,
+                        "retriever_url": m.retriever_url,
+                    }
+                )
+            if action == "warn_status":
+                warn_items = m.warn_zone_items()
+                return jsonify(
+                    {
+                        "ok": True,
+                        "warn_size": m.warn_zone_size(),
+                        "warn_capacity": m.warn_zone_capacity(),
+                        "skills": [it.to_json_dict() for it in warn_items],
                     }
                 )
             if action == "get":
@@ -222,27 +402,10 @@ def manage():
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Skill memory HTTP server (embedding 启动预加载)")
+    p = argparse.ArgumentParser(description="Skill memory HTTP server")
     p.add_argument("--host", type=str, default="0.0.0.0")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--max-capacity", type=int, default=10_000)
-    p.add_argument(
-        "--embedding-model",
-        type=str,
-        default=DEFAULT_EMBEDDING_MODEL,
-        help="SentenceTransformer 模型名或路径",
-    )
-    p.add_argument(
-        "--embedding-device",
-        type=str,
-        default="",
-        help="留空则由 sentence-transformers 自行选择",
-    )
-    p.add_argument(
-        "--no-trust-remote-code",
-        action="store_true",
-        help="加载模型时不传 trust_remote_code=True",
-    )
     p.add_argument(
         "--retrieve-mode",
         type=str,
@@ -251,45 +414,71 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--retrieve-lambda", type=float, default=0.5)
     p.add_argument(
+        "--retriever-url",
+        type=str,
+        default=DEFAULT_RETRIEVER_URL,
+        help=f"retriever_server 的 HTTP 地址（默认 {DEFAULT_RETRIEVER_URL}）",
+    )
+    p.add_argument(
+        "--retriever-timeout",
+        type=float,
+        default=30.0,
+        help="调用 retriever_server 的超时秒数（默认 30s）",
+    )
+    p.add_argument(
         "--skills-jsonl",
         type=str,
         default="",
         help="启动时可选：从该 jsonl 批量导入（已存在 id 会跳过）",
     )
+    p.add_argument(
+        "--persist-path",
+        type=str,
+        default="",
+        help=(
+            "持久化 jsonl 路径；/add 接口成功后追加写入此文件。"
+            "留空则使用默认路径 runs/skills_memory.jsonl"
+        ),
+    )
+    p.add_argument("--update-lam", type=float, default=0.9, help="utility EMA 衰减系数 λ（默认 0.9）")
+    p.add_argument("--update-tau", type=float, default=0.2, help="reward 阈值 τ，低于此值不触发更新（默认 0.2）")
+    p.add_argument("--update-u-min", type=float, default=0.0, help="utility 下界（默认 0.0）")
+    p.add_argument("--update-u-max", type=float, default=1.0, help="utility 上界（默认 1.0）")
+    p.add_argument("--warn-capacity", type=int, default=200, help="警告区最大容量（默认 200）")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
-    global _manager
+    global _manager, _UPDATE_LAM, _UPDATE_TAU, _UPDATE_U_MIN, _UPDATE_U_MAX
     args = _parse_args(argv)
 
-    device = args.embedding_device.strip() or None
+    _UPDATE_LAM = args.update_lam
+    _UPDATE_TAU = args.update_tau
+    _UPDATE_U_MIN = args.update_u_min
+    _UPDATE_U_MAX = args.update_u_max
+
+    persist_path = args.persist_path.strip() or None
     _manager = SkillManager(
         max_capacity=args.max_capacity,
+        warn_capacity=args.warn_capacity,
         retrieve_mode=args.retrieve_mode,
         retrieve_lambda=args.retrieve_lambda,
-        embedding_model_name=args.embedding_model,
-        embedding_device=device,
-        embedding_trust_remote_code=not args.no_trust_remote_code,
+        retriever_url=args.retriever_url,
+        retriever_timeout=args.retriever_timeout,
+        persist_path=persist_path,
     )
 
-    print("[memory_server] Loading embedding model (warm-up)...", flush=True)
-    try:
-        _manager.warm_up_embedding()
-    except Exception as e:
-        print(f"[memory_server] FATAL: embedding warm-up failed: {e}", file=sys.stderr, flush=True)
-        sys.exit(1)
-    print("[memory_server] Embedding ready.", flush=True)
-
     if args.skills_jsonl:
-        from pathlib import Path
+        from pathlib import Path as _Path
 
-        n = _manager.load_jsonl(Path(args.skills_jsonl))
+        n = _manager.load_jsonl(_Path(args.skills_jsonl))
         print(f"[memory_server] Loaded {n} new skills from {args.skills_jsonl}", flush=True)
 
     print(
         f"[memory_server] Listening http://{args.host}:{args.port} "
-        f"(retrieve_mode={_manager.retrieve_mode.value})",
+        f"(retrieve_mode={_manager.retrieve_mode.value}, "
+        f"retriever_url={_manager.retriever_url}, "
+        f"main_capacity={args.max_capacity}, warn_capacity={args.warn_capacity})",
         flush=True,
     )
     app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)

@@ -31,15 +31,17 @@ cd "$SCRIPT_DIR"
 PYTHON="${PYTHON:-python3}"
 PORT="${PORT:-5000}"
 SERVER="http://127.0.0.1:${PORT}"
+API_KEY="${API_KEY:-EMPTY}"
+SOLVER_MODEL="${SOLVER_MODEL:-}"
 
 SOLVER_DATA="${SOLVER_DATA:-datas/AIME-24.jsonl}"
-SOLVER_SKILLS_JSONL="${SOLVER_SKILLS_JSONL:-runs/skill_induction/AIME-24/20260324_191118_128430/skills.jsonl}"
+SOLVER_SKILLS_JSONL="${SOLVER_SKILLS_JSONL:-runs/skill_induction/deepscalar_v2/20260328_205837_144018/skills.jsonl}"
 SOLVER_N="${SOLVER_N:-8}"
 SOLVER_MAX_TOKENS="${SOLVER_MAX_TOKENS:-4096}"
 SOLVER_TEMPERATURE="${SOLVER_TEMPERATURE:-1.0}"
 SOLVER_TOP_P="${SOLVER_TOP_P:-1.0}"
 SOLVER_TOP_K="${SOLVER_TOP_K:-40}"
-SOLVER_OUTPUT_ROOT="${SOLVER_OUTPUT_ROOT:-runs/solver_with_skills_retrieval}"
+SOLVER_OUTPUT_ROOT="${SOLVER_OUTPUT_ROOT:-runs/solver_with_skills_retrieval_v2_v2_induction}"
 SOLVER_RUN_LABEL="${SOLVER_RUN_LABEL:-}"
 SOLVER_OUTPUT_JSONL="${SOLVER_OUTPUT_JSONL:-}"
 SOLVER_FRESH="${SOLVER_FRESH:-0}"
@@ -50,16 +52,16 @@ SOLVER_MODE="${SOLVER_MODE:-retrieve}"
 SOLVER_RETRIEVE_K="${SOLVER_RETRIEVE_K:-3}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-/home/xzs/data/model/Qwen3-Embedding-0.6B}"
 EMBEDDING_BATCH_SIZE="${EMBEDDING_BATCH_SIZE:-32}"
-EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cuda:2}"
+EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cuda:4}"
 
-SHUTDOWN_SERVER_AFTER_ROLLOUT="${SHUTDOWN_SERVER_AFTER_ROLLOUT:-1}"
-SHUTDOWN_TOKEN="${SHUTDOWN_TOKEN:-}"
+SHUTDOWN_SERVER_AFTER_ROLLOUT="${SHUTDOWN_SERVER_AFTER_ROLLOUT:-0}"
 
 SOLVER_CMD=(
   "$PYTHON" solver_with_skills.py
   --data "$SOLVER_DATA"
   --skills_jsonl "$SOLVER_SKILLS_JSONL"
   --server "$SERVER"
+  --api_key "$API_KEY"
   --n "$SOLVER_N"
   --max_tokens "$SOLVER_MAX_TOKENS"
   --temperature "$SOLVER_TEMPERATURE"
@@ -73,6 +75,9 @@ SOLVER_CMD=(
   --embedding_model "$EMBEDDING_MODEL"
   --embedding_batch_size "$EMBEDDING_BATCH_SIZE"
 )
+if [ -n "$SOLVER_MODEL" ]; then
+  SOLVER_CMD+=(--model "$SOLVER_MODEL")
+fi
 if [ -n "$EMBEDDING_DEVICE" ]; then
   SOLVER_CMD+=(--embedding_device "$EMBEDDING_DEVICE")
 fi
@@ -92,18 +97,5 @@ fi
 echo "[run_solver_with_skills] 执行: ${SOLVER_CMD[*]}"
 "${SOLVER_CMD[@]}"
 rc=$?
-
-if [ "$SHUTDOWN_SERVER_AFTER_ROLLOUT" = "1" ] && [ "$rc" -eq 0 ]; then
-  echo "[run_solver_with_skills] 任务成功，向 ${SERVER} 发送关机请求 …"
-  CURL_ARGS=(-sfS -X POST --max-time 30 "${SERVER}/shutdown")
-  if [ -n "$SHUTDOWN_TOKEN" ]; then
-    CURL_ARGS+=(-H "X-Shutdown-Token: ${SHUTDOWN_TOKEN}")
-  fi
-  if curl "${CURL_ARGS[@]}"; then
-    echo "[run_solver_with_skills] 已请求 vLLM 服务退出"
-  else
-    echo "[run_solver_with_skills] 警告: 未能触发关机" >&2
-  fi
-fi
 
 exit "$rc"

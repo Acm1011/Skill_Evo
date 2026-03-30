@@ -32,6 +32,12 @@ class SkillMemory:
         self._max_capacity = max_capacity
         self._by_id: dict[str, SkillItem] = {}
 
+    def min_utility_item(self) -> SkillItem | None:
+        """返回当前存储中 utility 最低的 SkillItem；为空时返回 None。"""
+        if not self._by_id:
+            return None
+        return min(self._by_id.values(), key=lambda it: it.utility)
+
     @property
     def max_capacity(self) -> int:
         return self._max_capacity
@@ -140,3 +146,73 @@ class SkillMemory:
                     break
                 added += 1
         return added
+
+
+class WarningZone:
+    """警告区：主库满时的临时降级存储区，容量远小于主库。
+
+    生命周期规则（由 SkillManager 负责执行）：
+    - skill 在警告区被检索到且结果为失败 → 彻底删除。
+    - skill 在警告区被检索到且结果为成功，且新 utility > 主库最低 utility → 晋升回主库。
+    - 警告区满时新 skill 进入前先淘汰 utility 最低的。
+    """
+
+    def __init__(self, max_capacity: int = 200) -> None:
+        if max_capacity < 0:
+            raise ValueError("warn max_capacity must be non-negative")
+        self._max_capacity = max_capacity
+        self._by_id: dict[str, SkillItem] = {}
+
+    @property
+    def max_capacity(self) -> int:
+        return self._max_capacity
+
+    @property
+    def capacity(self) -> int:
+        return len(self._by_id)
+
+    @property
+    def is_full(self) -> bool:
+        return self.capacity >= self._max_capacity
+
+    def get_by_id(self, skill_id: str) -> SkillItem | None:
+        return self._by_id.get(skill_id)
+
+    def add(self, item: SkillItem) -> None:
+        """加入一条 skill；id 已存在时抛 SkillMemoryDuplicateIdError，满时抛 SkillMemoryFullError。"""
+        if item.id in self._by_id:
+            raise SkillMemoryDuplicateIdError(f"warn zone id already exists: {item.id!r}")
+        if self.is_full:
+            raise SkillMemoryFullError(f"warn zone full ({self.capacity}/{self._max_capacity})")
+        self._by_id[item.id] = item
+
+    def remove(self, skill_id: str) -> bool:
+        if skill_id not in self._by_id:
+            return False
+        del self._by_id[skill_id]
+        return True
+
+    def evict_min_utility(self) -> SkillItem | None:
+        """淘汰并返回 utility 最低的 skill；为空则返回 None。"""
+        item = self.min_utility_item()
+        if item is not None:
+            self.remove(item.id)
+        return item
+
+    def min_utility_item(self) -> SkillItem | None:
+        """返回 utility 最低的 SkillItem；为空时返回 None。"""
+        if not self._by_id:
+            return None
+        return min(self._by_id.values(), key=lambda it: it.utility)
+
+    def __len__(self) -> int:
+        return len(self._by_id)
+
+    def __contains__(self, skill_id: str) -> bool:
+        return skill_id in self._by_id
+
+    def items(self) -> Iterator[tuple[str, SkillItem]]:
+        yield from self._by_id.items()
+
+    def values(self) -> Iterator[SkillItem]:
+        yield from self._by_id.values()

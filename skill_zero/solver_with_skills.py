@@ -6,15 +6,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 from tqdm import tqdm
 
-from prompts import prompt_use_skill
+from prompts import prompt_use_skill, prompt_use_skill_v2
 
 import rollout as roll_r
 
@@ -69,7 +70,8 @@ def _load_skills_from_jsonl(
 
 
 def _skill_retrieval_text(skill_rec: dict) -> str:
-    pt = skill_rec.get("problem type")
+    # 优先使用统一字段 problem_type，兼容旧字段 "problem type" / "skill name"
+    pt = skill_rec.get("problem_type") or skill_rec.get("problem type")
     if pt is not None and str(pt).strip():
         return str(pt).strip()
     sn = skill_rec.get("skill name")
@@ -79,6 +81,11 @@ def _skill_retrieval_text(skill_rec: dict) -> str:
 
 
 def _format_skill_block(skill_rec: dict) -> str:
+    # 优先使用统一字段 skill_body
+    sb = skill_rec.get("skill_body")
+    if sb is not None and str(sb).strip():
+        return str(sb).strip()
+    # 回退：拼接 v1 各字段
     lines = []
     for k in SKILL_FIELDS:
         v = skill_rec.get(k)
@@ -91,7 +98,7 @@ def _format_retrieved_skills_block(skills: list[dict], scores: list[float]) -> s
     parts = []
     for rank, (sk, sc) in enumerate(zip(skills, scores), start=1):
         block = _format_skill_block(sk)
-        parts.append(f"[Rank {rank}, similarity={float(sc):.6f}]\n{block}")
+        parts.append(block)
     return "\n\n---\n\n".join(parts)
 
 
@@ -103,9 +110,10 @@ def _lookup_skill(by_id: dict[Any, dict], qid: Any) -> Optional[dict]:
     return None
 
 
-def _build_solver_messages(problem: str, system_prompt: str, skill_block: str):
+def _build_solver_messages(problem: str, system_prompt: str, skill_block: str) -> list[ChatCompletionMessageParam]:
     """direct / retrieve 均把技能（单条或 top-k 打包文本）填入 {skill}。"""
-    user = prompt_use_skill.format(skill=skill_block, question=problem)
+    user = prompt_use_skill_v2.format(skill=skill_block, question=problem)
+    print(user)
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user},
@@ -228,6 +236,18 @@ def main():
         type=str,
         default="http://127.0.0.1:5000",
     )
+    parser.add_argument(
+        "--api_key",
+        type=str,
+        default="EMPTY",
+        help="vllm serve 的 --api-key，未设置则填任意非空字符串。",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="served-model-name，默认从 /v1/models 自动获取第一个。",
+    )
     parser.add_argument("--n", type=int, default=1, help="Rollouts per question.")
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -266,6 +286,19 @@ def main():
     if not rows:
         print("[solver] no rows loaded", file=sys.stderr)
         sys.exit(1)
+
+    base_url = args.server.rstrip("/") + "/v1"
+    client = OpenAI(base_url=base_url, api_key=args.api_key)
+
+    model_name = args.model
+    if not model_name:
+        try:
+            models = client.models.list()
+            model_name = models.data[0].id
+            print(f"[solver] 自动获取模型名: {model_name}", file=sys.stderr)
+        except Exception as e:
+            print(f"[solver] 无法获取模型列表: {e}", file=sys.stderr)
+            sys.exit(1)
 
     skills_by_id, skills_corpus, n_skill_rows = _load_skills_from_jsonl(skills_path)
     print(
@@ -342,13 +375,11 @@ def main():
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    health_url = args.server.rstrip("/") + "/health"
     try:
-        with urllib.request.urlopen(health_url, timeout=10.0) as r:
-            if r.status != 200:
-                print(f"[solver] health check HTTP {r.status}", file=sys.stderr)
+        client.models.list()
+        print(f"[solver] 服务连通: {base_url}", file=sys.stderr)
     except Exception as e:
-        print(f"[solver] health check failed: {e}", file=sys.stderr)
+        print(f"[solver] 服务连通检查失败: {e}", file=sys.stderr)
 
     st0 = roll_r._rollout_progress_stats(rows, merged, args.n)
     print(
@@ -549,28 +580,27 @@ def main():
 
         messages = _build_solver_messages(problem, args.system, skill_block)
 
-        body = {
-            "messages": messages,
-            "n": need,
-            "max_tokens": args.max_tokens,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "top_k": args.top_k,
-        }
+        extra_body = {"top_k": args.top_k} if args.top_k > 0 else None
         print(
             f"[solver] 请求 id={qid!r} idx={idx} mode={args.solver_mode} 补全 {need}/{args.n} 条 rollout …",
             file=sys.stderr,
         )
-        resp = roll_r._post_generate(args.server, body, args.request_timeout)
-        responses = roll_r._parse_text_response(resp)
-        err = resp.get("error")
-        err_s = (
-            None
-            if not err
-            else err
-            if isinstance(err, str)
-            else json.dumps(err, ensure_ascii=False)
-        )
+        try:
+            api_resp = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                n=need,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                extra_body=extra_body,
+                timeout=args.request_timeout,
+            )
+            responses = [c.message.content or "" for c in api_resp.choices]
+            err_s = None
+        except Exception as e:
+            responses = []
+            err_s = str(e)
         roll_r._append_rollouts(rollouts, need, responses, err_s)
         rec["rollouts"] = rollouts
         merged[key] = rec
