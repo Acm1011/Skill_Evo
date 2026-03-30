@@ -1,0 +1,3 @@
+Please reason step by step, and put your final answer within \boxed{{}}. You will be given some reusable problem-solving skills, and you can refer to them during the reasoning.
+SKILL: {skill}
+Question: {question}

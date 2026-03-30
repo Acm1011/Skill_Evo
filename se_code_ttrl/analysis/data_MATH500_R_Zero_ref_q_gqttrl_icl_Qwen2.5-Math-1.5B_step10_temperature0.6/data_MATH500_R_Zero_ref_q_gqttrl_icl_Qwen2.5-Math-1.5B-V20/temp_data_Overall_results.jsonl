@@ -1,2 +1,0 @@
-{"data_source": "AIME24", "model": "data_MATH500_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V20", "rule@first": "13.33", "rule_mean@32": "10.73", "checked_sample_mean@32": "10.73", "checked@first": "13.33", "checked_mean@32": "10.73", "n_samples": 32, "temperature": 0.6}
-{"data_source": "AIME25", "model": "data_MATH500_R_Zero_ref_q_gqttrl_icl_Qwen2.5-Math-1.5B-V20", "rule@first": "6.67", "rule_mean@32": "5.21", "checked_sample_mean@32": "5.21", "checked@first": "6.67", "checked_mean@32": "5.21", "n_samples": 32, "temperature": 0.6}

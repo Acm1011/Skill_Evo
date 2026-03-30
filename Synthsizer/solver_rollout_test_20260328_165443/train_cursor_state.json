@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "data_fingerprint": "/mnt/sdi/ycy/data/DeepMath-103K.jsonl:81379336:1765459500",
+  "total_n": 103022,
+  "cursor": 16,
+  "data_files": [
+    "/mnt/sdi/ycy/data/DeepMath-103K.jsonl"
+  ]
+}

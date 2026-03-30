@@ -1,0 +1,734 @@
+from collections import defaultdict,Counter
+
+import torch
+import re
+from verl import DataProto
+from verl.utils.reward_score import default_compute_score
+from verl.workers.reward_manager import register
+from verl.workers.reward_manager.abstract import AbstractRewardManager
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
+
+from skill_src.solver_offline_driver import post_rollout, resolve_rollout_server_urls
+from skill_src.utils import INSTRUCTIONS
+import json
+from mathruler.grader import extract_boxed_content, grade_answer
+import os
+import time
+import random
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import uuid
+from collections import Counter
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from sklearn.cluster import AgglomerativeClustering
+import numpy as np
+
+
+
+def custom_extract_boxed_content(text: str) -> str:
+    """
+    Extracts answers in \\boxed{}.
+    """
+    depth = 0
+    start_pos = text.rfind(r"\boxed{")
+    end_pos = -1
+    if start_pos != -1:
+        content = text[start_pos + len(r"\boxed{") :]
+        for i, char in enumerate(content):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+
+            if depth == -1:  # exit
+                end_pos = i
+                break
+
+    if end_pos != -1:
+        return content[:end_pos].strip()
+
+    return None
+
+
+def _bleu_distance_matrix(sentences):
+    n = len(sentences)
+    dist = np.zeros((n, n))
+    smoother = SmoothingFunction().method1
+    for i in range(n):
+        for j in range(i, n):
+            if i == j:
+                score = 1.0
+            else:
+                ref = [sentences[j].split()]
+                hyp = sentences[i].split()
+                score = sentence_bleu(ref, hyp, smoothing_function=smoother)
+                # sentence_bleu may return float or list[float], ensure we get a float
+                score = score[0] if isinstance(score, list) else score
+            dist[i, j] = dist[j, i] = 1 - score
+    return dist
+
+def cluster_share_per_problem(
+        problems,
+        distance_threshold: float = 0.5,
+        linkage: str = "average"):
+    if not problems:
+        return []
+    print('start clustering')
+    start_time = time.time()
+    dist_mat = _bleu_distance_matrix(problems)
+
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        distance_threshold=distance_threshold,
+        metric="precomputed",
+        linkage=linkage
+    )
+    labels = clustering.fit_predict(dist_mat)
+    print(f'end clustering, time: {time.time() - start_time}')
+    total = len(problems)
+    cluster_size = Counter(labels)
+    cluster_ratio = {lab: sz / total for lab, sz in cluster_size.items()}
+
+    proportions = [cluster_ratio[lab] for lab in labels]
+    return proportions
+
+def generate_temp_filename(storage_path:str, prefix="temp", suffix=".json"):
+    timestamp = int(time.time() * 1000) 
+    rand_part = random.randint(0, 99999)
+    os.makedirs(f"{storage_path}/temp_results", exist_ok=True)
+    return f"{storage_path}/temp_results/{prefix}_{timestamp}_{rand_part}{suffix}"
+
+def split_list(lst, n=2):
+    k, m = divmod(len(lst), n)
+    return [lst[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n)]
+
+os.environ["NO_PROXY"] = "0.0.0.0,127.0.0.1"
+
+def get_reward_server_config():
+    """从环境变量获取 Reward Server 配置"""
+    # 获取端口列表
+    ports_str = os.environ.get("SE_REWARD_PORTS", "5000,5001")
+    ports = [int(p.strip()) for p in ports_str.split(",") if p.strip()]
+    
+    # 获取服务器数量
+    n_servers = int(os.environ.get("SE_N_REWARD_SERVERS", len(ports)))
+    
+    # 如果端口数量不足，使用基础端口生成
+    base_port = int(os.environ.get("SE_REWARD_BASE_PORT", 5000))
+    while len(ports) < n_servers:
+        ports.append(base_port + len(ports))
+    
+    return ports[:n_servers]
+
+def fetch(port, filepath, question_reward):
+    """向指定端口的 Reward Server 发送请求"""
+    response = requests.get(f"http://0.0.0.0:{port}/hello?name={filepath}&question_reward={question_reward}")
+    print(f"[fetch] port={port}, response={response}")
+    return True
+
+def generate_results(data, storage_path: str, question_reward: str):
+    """将数据分发到多个 Reward Server 并收集结果"""
+    # 从环境变量获取端口配置
+    ports = get_reward_server_config()
+    n_servers = len(ports)
+    
+    print(f"[generate_results] 使用 {n_servers} 个 Reward Server, 端口: {ports}")
+    
+    # 将数据分成 n_servers 份
+    datas = split_list(data, n_servers)
+    random_names = [generate_temp_filename(storage_path=storage_path, prefix=f"temp_{i}") for i in range(n_servers)]
+    
+    # 保存数据到临时文件
+    for i in range(n_servers):
+        with open(random_names[i], 'w') as f:
+            json.dump(datas[i], f, indent=4)
+
+    final_results = []
+    with ThreadPoolExecutor(max_workers=n_servers) as executor:
+        # 使用端口列表而不是索引偏移
+        futures = [executor.submit(fetch, ports[i], random_names[i], question_reward) for i in range(n_servers)]
+
+        for future in as_completed(futures):
+            print(future.result())
+
+    for i in range(n_servers):
+        with open(random_names[i].replace('.json','_results.json'),'r') as f:
+            final_results.extend(json.load(f))
+    for i in range(n_servers):
+        os.remove(random_names[i].replace('.json','_results.json'))
+    return final_results
+
+
+@register("synthesizer")
+class SynthsizerRewardManager(AbstractRewardManager):
+    """The reward manager."""
+    def __init__(
+        self,
+        tokenizer,
+        num_examine,
+        compute_score=None,
+        reward_fn_key='synthesizer',
+        storage_path:str="",
+        rollout_server_urls: Optional[List[str]] = None,
+        rollout_request_timeout: float = 600.0,
+        use_skill_type: str = "skill_use_v1",
+        random_q_coef: float = 0.5,
+    ) -> None:
+        assert storage_path is not None, "storage_path must be provided"
+        self.tokenizer = tokenizer
+        self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
+        self.storage_path = storage_path
+        self.rollout_server_urls = rollout_server_urls
+        self.rollout_request_timeout = rollout_request_timeout
+        self.use_skill_type = use_skill_type
+        self.random_q_coef = random_q_coef
+        os.makedirs(self.storage_path, exist_ok=True)
+        
+    _SKILL_JSON_KEYS = ("skill name", "problem type", "key insight", "method")
+
+    def check_skill_format(
+        self, skill: str
+    ) -> Tuple[bool, Union[Dict[str, str], str]]:
+        """
+        校验模型输出的 skill 为 JSON 对象，且仅含四个 str 字段。
+
+        成功：``(True, parsed_dict)``，``parsed_dict`` 为 ``{"skill name": ..., ...}``。
+        失败：``(False, error_message)``。
+        """
+        if not isinstance(skill, str) or not skill.strip():
+            return False, "skill 为空或非字符串"
+        try:
+            obj = json.loads(skill.strip())
+        except json.JSONDecodeError as e:
+            return False, f"非合法 JSON: {e}"
+        if not isinstance(obj, dict):
+            return False, "JSON 根节点必须是对象"
+        keys = set(obj.keys())
+        required = set(self._SKILL_JSON_KEYS)
+        if keys != required:
+            missing = required - keys
+            extra = keys - required
+            parts = []
+            if missing:
+                parts.append(f"缺少字段: {sorted(missing)}")
+            if extra:
+                parts.append(f"多余字段: {sorted(extra)}")
+            return False, "; ".join(parts)
+        for k in self._SKILL_JSON_KEYS:
+            if not isinstance(obj[k], str):
+                return False, f"字段 {k!r} 必须是 str，当前为 {type(obj[k]).__name__}"
+        return True, {k: str(obj[k]) for k in self._SKILL_JSON_KEYS}
+
+    def _solver_use_skill(
+        self,
+        reward_info: List[Dict[str, Any]],
+        storage_path: str,
+        step: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        仅当 ``skill_info.is_format`` 为真时，将该样本打成 ``data_records`` 并异步请求
+        ``solver_offline_rollout_server`` ``/rollout``。
+
+        返回列表长度与 ``reward_info`` 一致、与 batch 下标对齐：未通过格式校验的条目为
+        ``skipped=True``，不访问 server。
+
+        环境变量与 ``solver_offline_driver`` 一致：``SE_ROLLOUT_SERVER_URLS`` 或
+        ``SE_ROLLOUT_N_SERVERS`` + ``SE_ROLLOUT_BASE_PORT`` + ``SE_ROLLOUT_HOST``；
+        或在构造 ``SynthsizerRewardManager`` 时传入 ``rollout_server_urls``。
+        """
+        urls = self.rollout_server_urls
+        if not urls:
+            urls = resolve_rollout_server_urls(None)
+        if not urls:
+            raise ValueError("rollout_server_urls 为空且环境变量未配置 rollout server URL")
+
+        os.makedirs(storage_path, exist_ok=True)
+
+        def _rollout_prompt_str(question_text: str,skill) -> str:
+            """供 rollout server 使用的完整输入串（与训练侧 chat 格式一致）。"""
+            with open(os.path.join(os.path.dirname(__file__), "prompt", f"{self.use_skill_type}.txt"), "r", encoding="utf-8") as f:
+                use_skill_template = f.read()
+            
+            messages = [
+                {"role": "user", "content": use_skill_template.format(skill=skill,question=question_text)},
+            ]
+            kw: Dict[str, Any] = {}
+            name = getattr(self.tokenizer, "name_or_path", "") or ""
+            if "qwen3" in str(name).lower():
+                kw["enable_thinking"] = False
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                add_special_tokens=True,
+                **kw,
+            )
+
+        def _pack_data_records(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+            raw = item["raw_q_info"]
+            rand = item["random_q_info"]
+            skill = item["skill_info"]["skill"]
+            rows: List[Dict[str, Any]] = [
+                {
+                    "prompt": _rollout_prompt_str(raw["question"],skill),
+                    "question": raw["question"],
+                    "gt": raw["gt"],
+                    "data_source": "synth_reward",
+                }
+            ]
+            random_questions = rand.get("questions") or []
+            random_gts = rand.get("gt") or []
+            if len(random_questions) != len(random_gts):
+                raise ValueError(
+                    f"random_q_info questions/gt 长度不一致: {len(random_questions)} vs {len(random_gts)}"
+                )
+            for q, gt in zip(random_questions, random_gts):
+                rows.append(
+                    {
+                        "prompt": _rollout_prompt_str(q,skill),
+                        "question": q,
+                        "gt": gt,
+                        "data_source": "synth_reward",
+                    }
+                )
+            return rows
+
+        def _one(job_idx: int, batch_i: int, item: Dict[str, Any]) -> Dict[str, Any]:
+            url = urls[job_idx % len(urls)]
+            try:
+                records = _pack_data_records(item)
+                nrec = len(records)
+                suffix = f"synth_r{step}_{item.get('idx', batch_i)}_{uuid.uuid4().hex[:10]}"
+                body: Dict[str, Any] = {
+                    "data_file": "",
+                    "data_records": records,
+                    "num_questions": nrec,
+                    "suffix": suffix,
+                    "storage_path": storage_path,
+                    "skill_type": "skill_generation_v1",
+                    "rollout_n": int(os.environ.get("SYNTH_ROLLOUT_N", "4")),
+                    "max_tokens": int(os.environ.get("SYNTH_ROLLOUT_MAX_TOKENS", "4096")),
+                    "top_k": int(os.environ.get("SYNTH_ROLLOUT_TOP_K", "50")),
+                    "top_p": float(os.environ.get("SYNTH_ROLLOUT_TOP_P", "0.95")),
+                    "gpu_utilization": float(
+                        os.environ.get("SYNTH_ROLLOUT_GPU_UTIL", "0.9")
+                    ),
+                    "temperature": float(os.environ.get("SYNTH_ROLLOUT_TEMPERATURE", "1.0")),
+                    "num_random_questions": 0,
+                }
+                payload = post_rollout(
+                    url, body, timeout=self.rollout_request_timeout
+                )
+                """
+                payload:
+                 {
+                "q": row['q'],
+                "responses": responses,
+                "answers": answers,
+                "gt": gt,
+                "is_right": is_right,
+                "acc": raw_q_acc,
+                }
+                """
+                return {
+                    "idx": item.get("idx", batch_i),
+                    "step": step,
+                    "skipped": False,
+                    "reason": None,
+                    "server_url": url,
+                    "reward_input": item,
+                    "rollout_response": payload,
+                    "error": None,
+                }
+            except Exception as e:
+                return {
+                    "idx": item.get("idx", batch_i),
+                    "step": step,
+                    "server_url": url,
+                    "reward_input": item,
+                    "rollout_response": None,
+                    "error": str(e),
+                }
+
+        n = len(reward_info)
+        if n == 0:
+            return []
+
+        out: List[Optional[Dict[str, Any]]] = [None] * n
+        for i, item in enumerate(reward_info):
+            if not item.get("skill_info", {}).get("is_format"):
+                out[i] = {
+                    "idx": item.get("idx", i),
+                    "step": step,
+                    "skipped": True,
+                    "reason": "skill_format_invalid",
+                    "server_url": None,
+                    "reward_input": item,
+                    "rollout_response": None,
+                    "error": None,
+                }
+
+        eligible: List[Tuple[int, Dict[str, Any]]] = [
+            (i, item)
+            for i, item in enumerate(reward_info)
+            if item.get("skill_info", {}).get("is_format")
+        ]
+        if eligible:
+            max_workers = min(len(eligible), max(8, len(urls) * 2))
+            futs: Dict = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                for job_idx, (i, item) in enumerate(eligible):
+                    fut = ex.submit(_one, job_idx, i, item)
+                    futs[fut] = i
+                for fut in as_completed(futs):
+                    i = futs[fut]
+                    out[i] = fut.result()
+        # out_path = os.path.join(
+        #     storage_path, f"synth_rollout_step_{str(step).zfill(6)}.json"
+        # )
+        # try:
+        #     with open(out_path, "w", encoding="utf-8") as f:
+        #         json.dump(out, f, indent=2, ensure_ascii=False)
+        # except OSError:
+        #     pass
+        assert all(x is not None for x in out)
+        return cast(List[Dict[str, Any]], out)
+    def random_q_f(self, random_acc_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        计算得分
+        """
+
+        return sum(random_acc_list) / len(random_acc_list) if random_acc_list else 0.0
+    def __call__(self, data: DataProto, return_dict: bool = False, step: int = 0):
+        """We will expand this function gradually based on the available datasets"""
+
+        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
+        if "rm_scores" in data.batch.keys():
+            if return_dict:
+                reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
+                reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
+                return {"reward_tensor": data.batch["rm_scores"], "reward_extra_info": reward_extra_info}
+            else:
+                return data.batch["rm_scores"]
+
+        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_extra_info = defaultdict(list)
+        core_reward_info=[]
+        valid_response_lengths=[]
+        for i in range(len(data)):
+            data_item = data[i]  # DataProtoItem
+
+            prompt_ids = data_item.batch["prompts"]
+
+            prompt_length = prompt_ids.shape[-1]
+
+            #valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+            #valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+            valid_response_lengths.append(valid_response_length)
+
+            # decode
+            #prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+            skill_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            eos_token = self.tokenizer.eos_token
+            if skill_str.endswith(eos_token):
+                skill_str = skill_str[: -len(eos_token)]
+            is_skill_format, skill_or_err = self.check_skill_format(skill_str)
+            raw_q_info=data_item.non_tensor_batch['extra_info']['raw_q_info']
+            random_q_info=data_item.non_tensor_batch['extra_info']['random_q_info']
+            core_reward_info.append({
+                'idx':i,
+                'step':step,
+                'raw_q_info':{
+                    'question':raw_q_info['question'],
+                    'gt':raw_q_info['gt'],
+                    'acc':raw_q_info['acc'],
+                },
+                'random_q_info':{
+                    'questions':random_q_info['questions'],
+                    'gt':random_q_info['gt'],
+                    'acc':random_q_info['random_q_acc'],
+                },
+                'skill_info':{
+                    'is_format':is_skill_format,
+                    'skill':skill_or_err,
+                },
+            })
+        rollout_results = self._solver_use_skill(
+            core_reward_info, storage_path=self.storage_path, step=step
+        )
+        assert len(rollout_results) == len(core_reward_info), "rollout_results and core_reward_info must have the same length"
+        reward_infos=[]
+        for i, rollout_result in enumerate(rollout_results):
+            reward=-1.0
+            raw_q_acc = core_reward_info[i]['raw_q_info']['acc']
+            raw_random_q_acc = core_reward_info[i]['random_q_info']['acc']
+            skill_raw_q_acc=None
+            skill_random_q_acc=[None]*(len(core_reward_info[i]['random_q_info']['questions']) - 1)
+            raw_q_acc_delta=None
+            random_q_acc_delta=None
+            if not rollout_result['skipped']:
+                assert core_reward_info[i]['raw_q_info']['questions'] == rollout_result[0]['rollout_response']['q'], "raw_q_info and rollout_response must have the same question"
+                skill_raw_q_acc = rollout_result[0]['rollout_response']['acc']
+                skill_random_q_acc = [row['rollout_response']['acc'] for row in rollout_result[1:]]
+                raw_q_acc_delta = skill_raw_q_acc - raw_q_acc
+                random_q_acc_delta = self.random_q_f(skill_random_q_acc) - self.random_q_f(raw_random_q_acc)
+                reward = raw_q_acc_delta + self.random_q_coef * random_q_acc_delta
+            reward_tensor[i, valid_response_lengths[i] - 1] = reward
+            reward_infos.append({
+                'idx':i,
+                'step':step,
+                'raw_q_info':core_reward_info[i]['raw_q_info'],
+                'random_q_info':core_reward_info[i]['random_q_info'],
+                'skill_info':core_reward_info[i]['skill_info'],
+                'rollout_result':rollout_result,
+                'reward':reward,
+                'reward_info':{
+                    'raw_q_acc':raw_q_acc,
+                    'raw_random_q_acc':raw_random_q_acc,
+                    'skill_raw_q_acc':skill_raw_q_acc,
+                    'skill_random_q_acc':skill_random_q_acc,
+                    "skill_skipped":rollout_result['skipped'],
+                    'raw_q_acc_delta':raw_q_acc_delta,
+                    'random_q_acc_delta':random_q_acc_delta,
+                    'reward':reward,
+                }
+            })
+        reward_info_path_dir = f"{self.storage_path}/reward_info/"
+        os.makedirs(reward_info_path_dir, exist_ok=True)
+        with open(os.path.join(reward_info_path_dir, f"exp_data_ step_{str(step).zfill(3)}.jsonl"), "w", encoding="utf-8") as f:
+            for reward_info in reward_infos:
+                f.write(json.dumps(reward_info, ensure_ascii=False) + '\n')
+            
+        if return_dict:
+            return {
+                "reward_tensor": reward_tensor,
+                "reward_extra_info": reward_extra_info,
+            }
+        else:
+            return reward_tensor
+
+
+
+@register("solver")
+class SolverRewardManager(AbstractRewardManager):
+    """The reward manager."""
+
+    def __init__(
+        self,
+        tokenizer,
+        num_examine,
+        compute_score=None,
+        reward_fn_key="data_source",
+        storage_path:str="",
+        filter_lower= 0.0,
+        filter_high= 1.0,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
+        self.storage_path = storage_path
+        self.low = filter_lower
+        self.high = filter_high
+        
+    def compute_score(
+        self,
+        solution_str: str,
+        ground_truth: str,
+    ) -> dict[str, Any]:
+        """Compute the reward score for a solution.
+
+        Args:
+            solution_str: The solution string
+            ground_truth: The ground truth answer
+        
+        Returns:
+            Reward score (1.0 for correct, -1.0 for incorrect)
+        """
+        # Limit solution length for efficiency
+        solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
+
+        # Verify the solution
+        if not isinstance(ground_truth, list):
+            ground_truth = [ground_truth]
+        correct = False
+        pred = custom_extract_boxed_content(solution_str)
+        for gt in ground_truth:
+            if pred is None:
+                continue
+            correct = grade_answer(str(pred), str(gt))
+            if correct:
+                break
+
+        reward = 1.0 if correct  else 0.0
+        acc = reward
+
+        return {
+            "score": reward,
+            "acc": acc,
+            "pred": pred if pred is not None else 'None',
+        }
+ 
+    def __call__(self, data: DataProto, return_dict: bool = False, step: int = 0):
+        """We will expand this function gradually based on the available datasets"""
+
+        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
+        if "rm_scores" in data.batch.keys():
+            if return_dict:
+                reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
+                reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
+                return {"reward_tensor": data.batch["rm_scores"], "reward_extra_info": reward_extra_info}
+            else:
+                return data.batch["rm_scores"]
+        #topics = data.non_tensor_batch["topic"] if self.num_examine == 0 else data.non_tensor_batch["data_source"]
+        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_extra_info = defaultdict(list)
+        uids = data.non_tensor_batch["uid"]
+        uid2labels = defaultdict(list)
+        uid2all_labels = defaultdict(list)
+        
+        labels = []
+        prompts = []
+        responses = []
+        responses_length = []
+
+        for i in range(len(data)):
+            data_item = data[i]  # DataProtoItem
+            
+            prompt_ids = data_item.batch["prompts"]
+
+            prompt_length = prompt_ids.shape[-1]
+
+            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            responses_length.append(valid_response_length)
+            valid_response_ids = response_ids[:valid_response_length]
+
+            # decode
+            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            eos_token = self.tokenizer.eos_token
+            if response_str.endswith(eos_token):
+                response_str = response_str[: -len(eos_token)]
+            label = custom_extract_boxed_content(response_str[-300:])
+            uid2all_labels[uids[i]].append(label if label is not None else 'None') 
+
+            if label is not None:
+                uid2labels[uids[i]].append(label)
+            
+            prompts.append(prompt_str)
+            responses.append(response_str)
+        uid2ground_truths = defaultdict(lambda:None)   
+        ground_truths = []
+        for i in range(len(data)):
+            if 'ground_truth' in data[i].non_tensor_batch['reward_model']:
+                ground_truths.append(data[i].non_tensor_batch['reward_model']['ground_truth'])
+            else:
+                if uid2ground_truths[uids[i]] is not None:
+                    ground_truths.append(uid2ground_truths[uids[i]])
+                    continue
+                answers_count = {}
+                for res in list(uid2labels[uids[i]]):
+                    if not res: continue
+                    matched = False
+                    for exist_ans in list(set(answers_count.keys())):
+                        if res == exist_ans or ('no ' in res.lower() and 'no ' in exist_ans.lower()):
+                            answers_count[exist_ans] += 1
+                            matched = True
+                            break
+                        try:
+                            is_match = False
+                            is_match = grade_answer(str(res), str(exist_ans))
+                            if is_match:
+                                answers_count[exist_ans] += 1
+                                matched = True
+                                break
+                        except Exception as e:
+                            print(f"Error comparing '{res}' and '{exist_ans}': {e}")
+                            continue
+                    if not matched:
+                        answers_count[res] = 1
+                if not answers_count:
+                    majority_ans, max_count = '', 0
+                else:
+                    majority_ans = max(answers_count, key=answers_count.get)
+                    max_count = answers_count[majority_ans]
+                uid2ground_truths[uids[i]]=majority_ans
+                ground_truths.append(majority_ans)
+        reward_infos = []
+        uid2group_acc = defaultdict(list)
+        for i in range(len(data)):
+            if self.num_examine > 0: # val data
+                expected_gt = data[i].non_tensor_batch['reward_model'].get('ground_truth', [])
+                assert expected_gt == ground_truths[i], f"val data ground_truth is not correct: expected {expected_gt}, got {ground_truths[i]}" 
+            
+            result = self.compute_score(responses[i], ground_truths[i])
+            score: float
+            valid_response_length = responses_length[i]
+            if isinstance(result, dict):
+                score = result["score"]
+                uid2group_acc[uids[i]].append(result["acc"])
+                # Store the information including original reward
+                for key, value in result.items():
+                    reward_extra_info[key].append(value)
+            else:
+                score = result
+                uid2group_acc[uids[i]].append(score)
+                reward_extra_info["acc"].append(score)
+            reward = score
+            reward_tensor[i, valid_response_length - 1] = reward
+            
+            reward_infos.append(
+                {
+                    'idx':i,
+                    "step": step,
+                    "style": "val" if self.num_examine > 0 else "exp",
+                    "question": prompts[i],
+                    'raw_question': data[i].non_tensor_batch['raw_prompt'],
+                    "response": responses[i],
+                    "pred": result.get("pred", ""),
+                    "all_labels": uid2all_labels[uids[i]],
+                    'filtered_labels': uid2labels[uids[i]],
+                    "ground_truth(majority)": ground_truths[i],
+                    "reward": reward,
+                }
+            )
+            
+        for i, example in enumerate(reward_infos):
+            acc_mean=float(np.mean(uid2group_acc[uids[i]]))
+            example.update({
+                'uid2group_acc':uid2group_acc[uids[i]],
+                'uid2acc_mean': acc_mean,
+                'is_kept': bool(acc_mean >= self.low and acc_mean <= self.high)
+            })
+            #print(f'{i=},{example=}')
+        
+
+        reward_extra_info['reward_infos'] = reward_infos
+        #reward_infos =[example.update({'uid2group_acc':uid2group_acc[uids[i]]}) for i, example in enumerate(reward_infos)]
+        #/root/users/ycy/Self-evolving-Agent/saved_results/Solver/Qwen3-4B-Base-V1
+        reward_info_path_dir = f"{self.storage_path}/reward_info/"
+        step_str = str(step).zfill(3)
+        if self.num_examine > 0:
+            os.makedirs(f"{reward_info_path_dir}/valdata", exist_ok=True)
+            with open(f"{reward_info_path_dir}/valdata/step_{step_str}.jsonl", 'w', encoding='utf-8') as f:
+                for reward_info in reward_infos:
+                    f.write(json.dumps(reward_info, ensure_ascii=False) + '\n')
+        else:
+            os.makedirs(f"{reward_info_path_dir}/expdata", exist_ok=True)
+            with open(f"{reward_info_path_dir}/expdata/step_{step_str}.jsonl", 'w', encoding='utf-8') as f:
+                for reward_info in reward_infos:
+                    f.write(json.dumps(reward_info, ensure_ascii=False) + '\n')
+        if return_dict:
+            return {
+                "reward_tensor": reward_tensor,
+                "reward_extra_info": reward_extra_info,
+            }
+        else:
+            return reward_tensor
+

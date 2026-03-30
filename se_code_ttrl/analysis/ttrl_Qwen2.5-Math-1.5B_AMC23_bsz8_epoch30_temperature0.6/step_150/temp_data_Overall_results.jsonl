@@ -1,2 +1,0 @@
-{"data_source": "AIME24", "model": "ttrl_Qwen2.5-Math-1.5B_AMC23_bsz8_epoch30-step150", "step": 150, "rule@first": "13.33", "rule_mean@32": "6.04", "checked_sample_mean@32": "6.46", "checked@first": "13.33", "checked_mean@32": "6.46", "n_samples": 32, "temperature": 0.6}
-{"data_source": "AIME25", "model": "ttrl_Qwen2.5-Math-1.5B_AMC23_bsz8_epoch30-step150", "step": 150, "rule@first": "3.33", "rule_mean@32": "4.27", "checked_sample_mean@32": "4.38", "checked@first": "3.33", "checked_mean@32": "4.38", "n_samples": 32, "temperature": 0.6}

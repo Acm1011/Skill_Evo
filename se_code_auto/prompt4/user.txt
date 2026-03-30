@@ -1,5 +1,0 @@
-Generate one new, challenging math question.
-Follow ALL rules in the System Prompt.
-
-Topic:
-{TOPIC}
