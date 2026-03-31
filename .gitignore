@@ -138,4 +138,8 @@ outputs
 skill_zero/runs/
 skill_zero/logs/
 skill_zero/datas/
-skill_zero/memory_manager/test_results
+
+# Skill_Evo：实验输出（merged、ckpt、tensorboard、rollout 日志等）
+saved_results/
+# 根目录下历史 rollout 测试目录（勿提交大 JSON；仅匹配仓库根）
+/Synthsizer/

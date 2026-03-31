@@ -38,7 +38,52 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
+
+
+def _http_json_sanitize(obj: Any) -> Any:
+    """
+    将 numpy 标量 / 数组等转为 ``json.dumps`` 可编码类型。
+    parquet / DataProto 里读出的 ``question``、``gt`` 常为 ``numpy`` 类型，直接 ``json.dumps(body)``
+    会在 POST /rollout 时报错。
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, np.ndarray):
+        return _http_json_sanitize(obj.tolist())
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for k, v in obj.items():
+            key = k if isinstance(k, str) else str(_http_json_sanitize(k))
+            out[key] = _http_json_sanitize(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_http_json_sanitize(x) for x in obj]
+    raise TypeError(
+        f"_http_json_sanitize: 无法 JSON 编码的类型 {type(obj).__name__}"
+    )
+
+
+def _rollout_post_json_default(o: Any) -> Any:
+    """
+    ``json.dumps(..., default=...)`` 兜底：处理预清洗后仍残留的 numpy / bytes / pandas 等。
+    """
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, (bytes, bytearray)):
+        return bytes(o).decode("utf-8", errors="replace")
+    if isinstance(o, pd.Timestamp):
+        if pd.isna(o):
+            return None
+        return o.isoformat()
+    raise TypeError(
+        f"Object of type {type(o).__name__} is not JSON serializable"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +273,14 @@ def write_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(
+                    _http_json_sanitize(row),
+                    ensure_ascii=False,
+                    default=_rollout_post_json_default,
+                )
+                + "\n"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +294,11 @@ def post_rollout(
     timeout: float = 86400.0,
 ) -> Dict[str, Any]:
     url = server_url.rstrip("/") + "/rollout"
-    data = json.dumps(body).encode("utf-8")
+    data = json.dumps(
+        _http_json_sanitize(body),
+        ensure_ascii=False,
+        default=_rollout_post_json_default,
+    ).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=data,
@@ -350,18 +406,18 @@ def merge_shard_jsons(
 
 
 def _ensure_rollout_row_normalized(row: Dict[str, Any]) -> None:
-    """将单条 rollout 扁平字段（q, responses, …）整理为 extra_info.raw_q_info 等。"""
+    """将单条 rollout 扁平字段（question, responses, …）整理为 extra_info.raw_q_info 等。"""
     ei = row.setdefault("extra_info", {})
     if "raw_q_info" not in ei:
         ei["raw_q_info"] = {
-            "question": row["q"],
+            "question": row["question"],
             "responses": row["responses"],
             "answers": row["answers"],
             "gt": row["gt"],
             "is_right": row["is_right"],
             "acc": row["acc"],
         }
-    row["raw_question"] = row["q"]
+    row["raw_question"] = row["question"]
     row.setdefault("reward_model", {})["raw_q_acc"] = row["acc"]
 
 
@@ -397,12 +453,12 @@ def build_merged_rollout_records(
                 _ensure_rollout_row_normalized(merged[j])
 
             dataset_idxs = [merged[j]["idx"] for j in pick]
-            row["random_questions"] = [merged[j]["q"] for j in pick]
+            row["random_questions"] = [merged[j]["question"] for j in pick]
             row["random_q_indices"] = dataset_idxs
 
             rqi: Dict[str, Any] = {
                 "indices": dataset_idxs,
-                "questions": [merged[j]["q"] for j in pick],
+                "questions": [merged[j]["question"] for j in pick],
                 "responses": [],
                 "answers": [],
                 "gt": [],
@@ -446,7 +502,14 @@ def save_train_artifacts(
     jsonl_path = os.path.join(out_dir, f"{prefix}.jsonl")
     with open(jsonl_path, "w", encoding="utf-8") as f:
         for row in train_rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(
+                    _http_json_sanitize(row),
+                    ensure_ascii=False,
+                    default=_rollout_post_json_default,
+                )
+                + "\n"
+            )
     df = pd.DataFrame(train_rows)
     df.to_parquet(os.path.join(out_dir, f"{prefix}.parquet"))
 
@@ -464,6 +527,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise ValueError("data_files 中没有样本")
 
     need = args.steps * args.batch_size
+    print(f"[driver] need={need} samples")
     if total_n < need:
         raise ValueError(
             f"需要 len(data) >= steps*batch_size，当前 total_n={total_n}, need={need}"
@@ -495,6 +559,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     n_servers = len(server_urls)
     if n_servers == 0:
         raise ValueError("请提供 --server-urls 或配置 SE_ROLLOUT_SERVER_URLS / SE_ROLLOUT_N_SERVERS")
+
+    print(
+        f"[driver] rollout servers: n={n_servers} urls={server_urls!r} "
+        f"(本 round 样本数 {len(this_round)}，将拆成至多 {n_servers} 个分片)"
+    )
 
     sizes = split_sizes(len(this_round), n_servers)
 
@@ -547,6 +616,14 @@ def cmd_run(args: argparse.Namespace) -> None:
             body["data_file"] = ""
             body["data_records"] = task["records"]
         r = post_rollout(task["server_url"], body, timeout=args.request_timeout)
+        st = r.get("stats") if isinstance(r, dict) else None
+        if isinstance(st, dict) and st.get("wall_time_sec") is not None:
+            print(
+                f"[driver] shard {task['shard_id']} server_stats: "
+                f"wall_s={st.get('wall_time_sec')} "
+                f"prompts/s={st.get('prompts_per_sec')} "
+                f"completions/s={st.get('completions_per_sec')}"
+            )
         if args.shard_via_disk:
             out_path = r.get("output_path")
             if not out_path or not os.path.isfile(out_path):
@@ -562,6 +639,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         return task["global_base"], task["shard_id"], data
 
     shard_outputs: List[Tuple[int, List[Dict[str, Any]]]] = []
+    print(f"[driver] shard_tasks={len(shard_tasks)}")
+    print('start rollout')
     with ThreadPoolExecutor(max_workers=max(1, len(shard_tasks))) as ex:
         futs = [ex.submit(_one, t) for t in shard_tasks]
         for fut in as_completed(futs):

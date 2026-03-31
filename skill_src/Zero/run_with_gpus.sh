@@ -31,6 +31,7 @@
 #   test-rollout 可选 --model；未传时由 test_solver_rollout.sh 使用 DEFAULT_ROLLOUT_MODEL（见该脚本）
 #   SE_Synthsizer_DIR      - 合成器 / offline rollout 产物根目录（默认 ${SE_WORKING_DIR}/Synthsizer）
 #   SE_ROLLOUT_DIR         - solver_offline_driver 合并结果等默认落盘目录（默认同 SE_Synthsizer_DIR）
+#   （Ray 临时目录在 main_synthesizer：默认 $SE_RAY_TEMP_ROOT/r-$USER，SE_RAY_TEMP_ROOT 默认 /home/ycy/sdi）
 #
 # =============================================================================
 # sleep 7200
@@ -44,8 +45,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # =============================================================================
 
 # GPU 空闲判定阈值
-GPU_MEMORY_THRESHOLD_MB="${GPU_MEMORY_THRESHOLD_MB:-4000}"      # 显存占用低于此值视为空闲(MB)
-GPU_UTIL_THRESHOLD="${GPU_UTIL_THRESHOLD:-5}"                  # 利用率低于此值视为空闲(%)
+GPU_MEMORY_THRESHOLD_MB="${GPU_MEMORY_THRESHOLD_MB:-40000}"      # 显存占用低于此值视为空闲(MB)
+GPU_UTIL_THRESHOLD="${GPU_UTIL_THRESHOLD:-20}"                  # 利用率低于此值视为空闲(%)
 
 # 轮询配置
 POLL_INTERVAL="${POLL_INTERVAL:-1800}"                            # 检查间隔（秒）
@@ -67,8 +68,8 @@ SE_CODE_MODULE="${SE_CODE_MODULE:-skill_src}"
 SE_WORKING_DIR="${SE_BASE_DIR}/${SE_PROJECT_NAME}"
 SE_MODEL_DIR="${SE_MODEL_DIR:-${SE_BASE_DIR}/models}"
 SE_DATA_DIR="${SE_DATA_DIR:-${SE_BASE_DIR}/data}"
-SE_SAVED_RESULTS_DIR="${SE_SAVED_RESULTS_DIR:-${SE_BASE_DIR}/skill_saved}"
-SE_Synthsizer_DIR="${SE_Synthsizer_DIR:-${SE_WORKING_DIR}/Synthsizer}"
+SE_SAVED_RESULTS_DIR="${SE_SAVED_RESULTS_DIR:-${SE_WORKING_DIR}/saved_results}"
+SE_Synthsizer_DIR="${SE_Synthsizer_DIR:-${SE_SAVED_RESULTS_DIR}/Synthsizer}"
 # offline rollout 最终合并数据、状态等默认放在 Synthsizer 目录下（可被 SE_ROLLOUT_DIR 覆盖）
 SE_ROLLOUT_DIR="${SE_ROLLOUT_DIR:-${SE_Synthsizer_DIR}}"
 SE_Solver_DIR="${SE_Solver_DIR:-${SE_SAVED_RESULTS_DIR}/Solver}"

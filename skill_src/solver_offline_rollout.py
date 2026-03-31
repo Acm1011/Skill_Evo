@@ -3,12 +3,13 @@ import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
 
 
-from typing import Any, Dict, List
+import asyncio
+import uuid
+from typing import Any, Dict, List, Optional
 
 import vllm
 from transformers import AutoConfig, AutoTokenizer
 from vllm.outputs import RequestOutput
-from tqdm import tqdm
 import regex as re
 
 from skill_src.utils import custom_grade_answer, extract_boxed_content
@@ -75,6 +76,48 @@ def _prompt_strings(
     return out
 
 
+def build_rollout_results(
+    data_records: List[Dict[str, Any]],
+    completions: List[Any],
+) -> List[Dict[str, Any]]:
+    """
+    将 vLLM 的 ``RequestOutput`` 列表与 ``data_records`` 对齐，生成与历史 ``run_rollout`` 相同结构的
+    ``results``（字段：question、responses、answers、gt、is_right、acc）。
+    """
+    n = len(completions)
+    if n != len(data_records):
+        raise ValueError(
+            f"vLLM 返回条数 {n} 与 data_records {len(data_records)} 不一致"
+        )
+    results: List[Dict[str, Any]] = []
+    for i in range(n):
+        completion = completions[i]
+        row = data_records[i]
+        responses = [output.text for output in completion.outputs]
+        answers = [extract_boxed_content(response) for response in responses]
+        gt = _gt_from_row(row)
+        is_right = [custom_grade_answer(rsp, gt) for rsp in responses]
+        raw_q_acc = sum(is_right) / len(is_right) if len(is_right) > 0 else 0.0
+        if len(responses) != len(is_right):
+            raise RuntimeError(
+                f"responses and is_right must have the same length, "
+                f"but got {len(responses)} and {len(is_right)}"
+            )
+        results.append(
+            {
+                "question": row.get("question", "")
+                or row.get("extra_info", {}).get("question")
+                or row.get("extra_info", {}).get("problem"),
+                "responses": responses,
+                "answers": answers,
+                "gt": gt,
+                "is_right": is_right,
+                "acc": raw_q_acc,
+            }
+        )
+    return results
+
+
 def run_rollout(
     args,
     model=None,
@@ -83,10 +126,10 @@ def run_rollout(
     data_records: List[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    入参：``args`` 为采样与模型路径等配置；``data_records`` 每条含 ``prompt`` 与 ``gt`` /
-    ``reward_model.ground_truth``。
+    入参：``args`` 为采样与模型路径等配置；``data_records`` 每条含 ``prompt``、``question``、
+    ``gt`` / ``reward_model.ground_truth``。
 
-    出参：每条仅含本样本 rollout 与判分结果（无嵌套 ``extra_info`` 等）；driver 合并前会归一化。
+    出参：每条含 ``question`` 及 responses/answers/gt/is_right/acc；driver 合并前会再整理格式。
     """
     if not data_records:
         raise ValueError("data_records 不能为空")
@@ -130,32 +173,43 @@ def run_rollout(
         prompt_texts, sampling_params=sample_params, use_tqdm=False
     )
 
-    n = len(completions)
-    assert n == len(data_records), (
-        f"vLLM 返回条数 {n} 与 data_records {len(data_records)} 不一致"
+    return build_rollout_results(data_records, completions)
+
+
+async def run_rollout_async(
+    args: Any,
+    engine: Any,
+    tokenizer: Any,
+    qwen3_post_trained: bool,
+    data_records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    使用 ``AsyncLLMEngine``：对每条 prompt 并发 ``generate``，由 vLLM 内部队列做 continuous batching。
+    返回结构与 :func:`run_rollout` 一致。
+    """
+    if not data_records:
+        raise ValueError("data_records 不能为空")
+
+    prompt_texts = _prompt_strings(data_records, tokenizer, qwen3_post_trained)
+    sample_params = vllm.SamplingParams(
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        n=args.rollout_n,
+        stop_token_ids=[tokenizer.eos_token_id],
     )
 
-    results: List[Dict[str, Any]] = []
-    for i in tqdm(range(n), total=n, desc="Rollout results"):
-        completion = completions[i]
-        row = data_records[i]
-        responses = [output.text for output in completion.outputs]
-        answers = [extract_boxed_content(response) for response in responses]
-        gt = _gt_from_row(row)
-        is_right = [custom_grade_answer(rsp, gt) for rsp in responses]
-        raw_q_acc = sum(is_right) / len(is_right) if len(is_right) > 0 else 0.0
-        assert len(responses) == len(is_right), (
-            f"responses and is_right must have the same length, but got {len(responses)} and {len(is_right)}"
-        )
-        results.append(
-            {
-                "q": row['q'],
-                "responses": responses,
-                "answers": answers,
-                "gt": gt,
-                "is_right": is_right,
-                "acc": raw_q_acc,
-            }
-        )
+    async def _one(prompt: str, request_id: str) -> Any:
+        final: Optional[RequestOutput] = None
+        async for out in engine.generate(prompt, sample_params, request_id):
+            final = out
+        if final is None:
+            raise RuntimeError(f"vLLM 未返回输出 request_id={request_id!r}")
+        return final
 
-    return results
+    rids = [f"rollout-{uuid.uuid4().hex}" for _ in prompt_texts]
+    completions = await asyncio.gather(
+        *[_one(p, r) for p, r in zip(prompt_texts, rids, strict=True)]
+    )
+    return build_rollout_results(data_records, completions)

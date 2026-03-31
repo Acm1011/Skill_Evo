@@ -24,6 +24,32 @@ from sklearn.cluster import AgglomerativeClustering
 import numpy as np
 
 
+def _to_json_serializable(obj: Any) -> Any:
+    """把 reward 日志里的 numpy/torch 等转为 json 可序列化类型（仅用于落盘，不改变训练逻辑）。"""
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, torch.Tensor):
+        t = obj.detach().cpu()
+        if t.numel() == 1:
+            return t.item()
+        return _to_json_serializable(t.numpy())
+    if isinstance(obj, np.ndarray):
+        # object 数组或嵌套时 tolist() 里仍可能有 ndarray / np 标量，需继续递归
+        return _to_json_serializable(obj.tolist())
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for k, v in obj.items():
+            key = k if isinstance(k, str) else str(_to_json_serializable(k))
+            out[key] = _to_json_serializable(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_serializable(x) for x in obj]
+    raise TypeError(
+        f"_to_json_serializable: 未支持的类型 {type(obj).__name__}（reward 日志落盘）"
+    )
+
 
 def custom_extract_boxed_content(text: str) -> str:
     """
@@ -189,35 +215,17 @@ class SynthsizerRewardManager(AbstractRewardManager):
     def check_skill_format(
         self, skill: str
     ) -> Tuple[bool, Union[Dict[str, str], str]]:
-        """
-        校验模型输出的 skill 为 JSON 对象，且仅含四个 str 字段。
-
-        成功：``(True, parsed_dict)``，``parsed_dict`` 为 ``{"skill name": ..., ...}``。
-        失败：``(False, error_message)``。
-        """
-        if not isinstance(skill, str) or not skill.strip():
-            return False, "skill 为空或非字符串"
+        s = skill.strip()
+        if s.startswith("```"):
+            parts = s.split("\n", 1)
+            s = parts[1] if len(parts) > 1 else ""
+            if "```" in s:
+                s = s.rsplit("```", 1)[0]
+            s = s.strip()
         try:
-            obj = json.loads(skill.strip())
+            return json.loads(s), None
         except json.JSONDecodeError as e:
-            return False, f"非合法 JSON: {e}"
-        if not isinstance(obj, dict):
-            return False, "JSON 根节点必须是对象"
-        keys = set(obj.keys())
-        required = set(self._SKILL_JSON_KEYS)
-        if keys != required:
-            missing = required - keys
-            extra = keys - required
-            parts = []
-            if missing:
-                parts.append(f"缺少字段: {sorted(missing)}")
-            if extra:
-                parts.append(f"多余字段: {sorted(extra)}")
-            return False, "; ".join(parts)
-        for k in self._SKILL_JSON_KEYS:
-            if not isinstance(obj[k], str):
-                return False, f"字段 {k!r} 必须是 str，当前为 {type(obj[k]).__name__}"
-        return True, {k: str(obj[k]) for k in self._SKILL_JSON_KEYS}
+            return None, str(e)
 
     def _solver_use_skill(
         self,
@@ -235,6 +243,9 @@ class SynthsizerRewardManager(AbstractRewardManager):
         环境变量与 ``solver_offline_driver`` 一致：``SE_ROLLOUT_SERVER_URLS`` 或
         ``SE_ROLLOUT_N_SERVERS`` + ``SE_ROLLOUT_BASE_PORT`` + ``SE_ROLLOUT_HOST``；
         或在构造 ``SynthsizerRewardManager`` 时传入 ``rollout_server_urls``。
+
+        说明：``solver_offline_rollout_server`` 使用 ``AsyncLLMEngine``，多连接并发由 vLLM 内部队列
+        调度；与旧版相比 HTTP 响应及 ``results`` 条目的字段保持一致。
         """
         urls = self.rollout_server_urls
         if not urls:
@@ -276,8 +287,8 @@ class SynthsizerRewardManager(AbstractRewardManager):
                     "data_source": "synth_reward",
                 }
             ]
-            random_questions = rand.get("questions") or []
-            random_gts = rand.get("gt") or []
+            random_questions = rand["questions"]
+            random_gts = rand["gt"]
             if len(random_questions) != len(random_gts):
                 raise ValueError(
                     f"random_q_info questions/gt 长度不一致: {len(random_questions)} vs {len(random_gts)}"
@@ -285,7 +296,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
             for q, gt in zip(random_questions, random_gts):
                 rows.append(
                     {
-                        "prompt": _rollout_prompt_str(q,skill),
+                        "prompt": _rollout_prompt_str(q, skill),
                         "question": q,
                         "gt": gt,
                         "data_source": "synth_reward",
@@ -319,17 +330,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
                 payload = post_rollout(
                     url, body, timeout=self.rollout_request_timeout
                 )
-                """
-                payload:
-                 {
-                "q": row['q'],
-                "responses": responses,
-                "answers": answers,
-                "gt": gt,
-                "is_right": is_right,
-                "acc": raw_q_acc,
-                }
-                """
+                # payload: { ok, results: [ { question, responses, answers, gt, is_right, acc }, ... ], ... }
                 return {
                     "idx": item.get("idx", batch_i),
                     "step": step,
@@ -344,6 +345,8 @@ class SynthsizerRewardManager(AbstractRewardManager):
                 return {
                     "idx": item.get("idx", batch_i),
                     "step": step,
+                    "skipped": True,
+                    "reason": "http server error_occurred",
                     "server_url": url,
                     "reward_input": item,
                     "rollout_response": None,
@@ -356,7 +359,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
 
         out: List[Optional[Dict[str, Any]]] = [None] * n
         for i, item in enumerate(reward_info):
-            if not item.get("skill_info", {}).get("is_format"):
+            if not item["skill_info"]["is_format"]:
                 out[i] = {
                     "idx": item.get("idx", i),
                     "step": step,
@@ -371,7 +374,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
         eligible: List[Tuple[int, Dict[str, Any]]] = [
             (i, item)
             for i, item in enumerate(reward_info)
-            if item.get("skill_info", {}).get("is_format")
+            if item["skill_info"]["is_format"]
         ]
         if eligible:
             max_workers = min(len(eligible), max(8, len(urls) * 2))
@@ -393,12 +396,37 @@ class SynthsizerRewardManager(AbstractRewardManager):
         #     pass
         assert all(x is not None for x in out)
         return cast(List[Dict[str, Any]], out)
-    def random_q_f(self, random_acc_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        计算得分
-        """
 
-        return sum(random_acc_list) / len(random_acc_list) if random_acc_list else 0.0
+    def random_q_f(self, random_acc_list: List[Any]) -> float:
+        """对若干条 accuracy 取平均；含非数值则显式报错。
+
+        ``random_q_info["acc"]`` 等可能来自 parquet/numpy，须避免 ``if not ndarray`` 的真值歧义。
+        """
+        if random_acc_list is None:
+            return 0.0
+        if isinstance(random_acc_list, np.ndarray):
+            random_acc_list = random_acc_list.ravel().tolist()
+        elif isinstance(random_acc_list, (int, float, np.integer, np.floating)):
+            return float(random_acc_list)
+        elif isinstance(random_acc_list, tuple):
+            random_acc_list = list(random_acc_list)
+        elif not isinstance(random_acc_list, list):
+            raise TypeError(
+                f"random_q_f: 须为 list/tuple/ndarray/标量，实为 {type(random_acc_list).__name__}: {random_acc_list!r}"
+            )
+        if len(random_acc_list) == 0:
+            return 0.0
+        vals: List[float] = []
+        for j, x in enumerate(random_acc_list):
+            if isinstance(x, (np.integer, np.floating)):
+                x = float(x)
+            if not isinstance(x, (int, float)):
+                raise TypeError(
+                    f"random_q_f: 第 {j} 项须为 int/float，实为 {type(x).__name__}: {x!r}"
+                )
+            vals.append(float(x))
+        return sum(vals) / len(vals)
+
     def __call__(self, data: DataProto, return_dict: bool = False, step: int = 0):
         """We will expand this function gradually based on the available datasets"""
 
@@ -437,24 +465,25 @@ class SynthsizerRewardManager(AbstractRewardManager):
             if skill_str.endswith(eos_token):
                 skill_str = skill_str[: -len(eos_token)]
             is_skill_format, skill_or_err = self.check_skill_format(skill_str)
-            raw_q_info=data_item.non_tensor_batch['extra_info']['raw_q_info']
-            random_q_info=data_item.non_tensor_batch['extra_info']['random_q_info']
+            extra_info = data_item.non_tensor_batch["extra_info"]
+            raw_q_info = extra_info["raw_q_info"]
+            random_q_info = extra_info["random_q_info"]
             core_reward_info.append({
-                'idx':i,
-                'step':step,
-                'raw_q_info':{
-                    'question':raw_q_info['question'],
-                    'gt':raw_q_info['gt'],
-                    'acc':raw_q_info['acc'],
+                "idx": i,
+                "step": step,
+                "raw_q_info": {
+                    "question": raw_q_info["question"],
+                    "gt": raw_q_info["gt"],
+                    "acc": raw_q_info["acc"],
                 },
-                'random_q_info':{
-                    'questions':random_q_info['questions'],
-                    'gt':random_q_info['gt'],
-                    'acc':random_q_info['random_q_acc'],
+                "random_q_info": {
+                    "questions": random_q_info["questions"],
+                    "gt": random_q_info["gt"],
+                    "acc": random_q_info["acc"],
                 },
-                'skill_info':{
-                    'is_format':is_skill_format,
-                    'skill':skill_or_err,
+                "skill_info": {
+                    "is_format": is_skill_format,
+                    "skill": skill_or_err,
                 },
             })
         rollout_results = self._solver_use_skill(
@@ -463,45 +492,78 @@ class SynthsizerRewardManager(AbstractRewardManager):
         assert len(rollout_results) == len(core_reward_info), "rollout_results and core_reward_info must have the same length"
         reward_infos=[]
         for i, rollout_result in enumerate(rollout_results):
-            reward=-1.0
-            raw_q_acc = core_reward_info[i]['raw_q_info']['acc']
-            raw_random_q_acc = core_reward_info[i]['random_q_info']['acc']
-            skill_raw_q_acc=None
-            skill_random_q_acc=[None]*(len(core_reward_info[i]['random_q_info']['questions']) - 1)
-            raw_q_acc_delta=None
-            random_q_acc_delta=None
-            if not rollout_result['skipped']:
-                assert core_reward_info[i]['raw_q_info']['questions'] == rollout_result[0]['rollout_response']['q'], "raw_q_info and rollout_response must have the same question"
-                skill_raw_q_acc = rollout_result[0]['rollout_response']['acc']
-                skill_random_q_acc = [row['rollout_response']['acc'] for row in rollout_result[1:]]
+            reward = -1.0
+            if not isinstance(rollout_result, dict):
+                raise TypeError(
+                    f"SynthsizerRewardManager: batch[{i}] rollout_result 须为 dict，"
+                    f"实为 {type(rollout_result).__name__}"
+                )
+            if "skipped" not in rollout_result:
+                raise KeyError(
+                    f"SynthsizerRewardManager: batch[{i}] rollout_result 缺少 'skipped'，"
+                    f"keys={sorted(rollout_result.keys())!r}"
+                )
+            raw_q_acc = core_reward_info[i]["raw_q_info"]["acc"]
+            raw_random_q_acc = core_reward_info[i]["random_q_info"]["acc"]
+            skill_raw_q_acc = None
+            n_rand = len(core_reward_info[i]["random_q_info"]["questions"])
+            skill_random_q_acc = [None] * max(0, n_rand - 1)
+            raw_q_acc_delta = None
+            random_q_acc_delta = None
+            skipped = bool(rollout_result["skipped"])
+            if not skipped:
+                payload = rollout_result["rollout_response"]
+                if not isinstance(payload, dict):
+                    raise TypeError(
+                        f"batch[{i}] rollout_response 须为 dict，实为 {type(payload).__name__}"
+                    )
+                res_list = payload["results"]
+                if not isinstance(res_list, list) or len(res_list) == 0:
+                    raise RuntimeError(
+                        f"rollout server 返回无效（缺 results）: {payload!r}"
+                    )
+                assert (
+                    core_reward_info[i]["raw_q_info"]["question"]
+                    == res_list[0]["question"]
+                ), "raw_q_info and rollout_response must have the same question"
+                skill_raw_q_acc = res_list[0]["acc"]
+                skill_random_q_acc = [row["acc"] for row in res_list[1:]]
                 raw_q_acc_delta = skill_raw_q_acc - raw_q_acc
-                random_q_acc_delta = self.random_q_f(skill_random_q_acc) - self.random_q_f(raw_random_q_acc)
+                random_q_acc_delta = self.random_q_f(skill_random_q_acc) - self.random_q_f(
+                    raw_random_q_acc
+                )
                 reward = raw_q_acc_delta + self.random_q_coef * random_q_acc_delta
             reward_tensor[i, valid_response_lengths[i] - 1] = reward
             reward_infos.append({
-                'idx':i,
-                'step':step,
-                'raw_q_info':core_reward_info[i]['raw_q_info'],
-                'random_q_info':core_reward_info[i]['random_q_info'],
-                'skill_info':core_reward_info[i]['skill_info'],
-                'rollout_result':rollout_result,
-                'reward':reward,
-                'reward_info':{
-                    'raw_q_acc':raw_q_acc,
-                    'raw_random_q_acc':raw_random_q_acc,
-                    'skill_raw_q_acc':skill_raw_q_acc,
-                    'skill_random_q_acc':skill_random_q_acc,
-                    "skill_skipped":rollout_result['skipped'],
-                    'raw_q_acc_delta':raw_q_acc_delta,
-                    'random_q_acc_delta':random_q_acc_delta,
-                    'reward':reward,
-                }
+                "idx": i,
+                "step": step,
+                "raw_q_info": core_reward_info[i]["raw_q_info"],
+                "random_q_info": core_reward_info[i]["random_q_info"],
+                "skill_info": core_reward_info[i]["skill_info"],
+                "rollout_result": rollout_result,
+                "reward": reward,
+                "reward_info": {
+                    "raw_q_acc": raw_q_acc,
+                    "raw_random_q_acc": raw_random_q_acc,
+                    "skill_raw_q_acc": skill_raw_q_acc,
+                    "skill_random_q_acc": skill_random_q_acc,
+                    "skill_skipped": rollout_result["skipped"],
+                    "raw_q_acc_delta": raw_q_acc_delta,
+                    "random_q_acc_delta": random_q_acc_delta,
+                    "reward": reward,
+                },
             })
         reward_info_path_dir = f"{self.storage_path}/reward_info/"
         os.makedirs(reward_info_path_dir, exist_ok=True)
-        with open(os.path.join(reward_info_path_dir, f"exp_data_ step_{str(step).zfill(3)}.jsonl"), "w", encoding="utf-8") as f:
+        with open(os.path.join(reward_info_path_dir, f"exp_data_step_{str(step).zfill(3)}.jsonl"), "w", encoding="utf-8") as f:
             for reward_info in reward_infos:
-                f.write(json.dumps(reward_info, ensure_ascii=False) + '\n')
+                f.write(
+                    json.dumps(
+                        _to_json_serializable(reward_info),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
             
         if return_dict:
             return {

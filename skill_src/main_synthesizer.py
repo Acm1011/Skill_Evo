@@ -20,6 +20,35 @@ from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
 
 
+def _default_ray_temp_dir() -> str:
+    """Ray 会话根目录默认值（路径尽量短，避免 AF_UNIX 超过 ~107 字节）。
+
+    使用 ``$SE_RAY_TEMP_ROOT/r-$USER``，其中 ``SE_RAY_TEMP_ROOT`` 默认为 ``/home/ycy/sdi``（避免占满 ``/tmp``）。
+    也可设 hydra ``ray_kwargs.ray_init._temp_dir``，或环境变量 ``RAY_TMPDIR`` / ``SE_RAY_TMPDIR``（见 :func:`_resolve_ray_temp_dir`）。
+    """
+    root = os.environ.get("SE_RAY_TEMP_ROOT", "/home/ycy/sdi/tmp").strip()
+    if not root:
+        root = "/home/ycy/sdi"
+    return os.path.join(root, f"r-{os.getenv('USER', 'u')}")
+
+
+def _resolve_ray_temp_dir(ray_init_dict: dict) -> str:
+    """
+    优先级：``ray_init._temp_dir``（非空） > 环境变量 ``RAY_TMPDIR`` / ``SE_RAY_TMPDIR`` >
+    :func:`_default_ray_temp_dir`。
+    """
+    td = ray_init_dict.get("_temp_dir")
+    if td is not None:
+        s = str(td).strip()
+        if s and s.lower() not in ("null", "none", "~"):
+            return os.path.abspath(os.path.expanduser(s))
+    for key in ("RAY_TMPDIR", "SE_RAY_TMPDIR"):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return os.path.abspath(os.path.expanduser(v))
+    return os.path.abspath(_default_ray_temp_dir())
+
+
 @hydra.main(config_path="config", config_name="synthesizer_trainer", version_base=None)
 def main(config):
     run_ppo(config)
@@ -32,8 +61,13 @@ def run_ppo(config) -> None:
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        ray_init_dict = OmegaConf.to_container(ray_init_kwargs, resolve=True)
+        temp_root = _resolve_ray_temp_dir(ray_init_dict)
+        os.makedirs(temp_root, exist_ok=True)
+        ray_init_dict["_temp_dir"] = temp_root
+        os.environ["RAY_TMPDIR"] = temp_root
+        print(f"ray init kwargs: {ray_init_dict}")
+        ray.init(**ray_init_dict)
 
     if (
         is_cuda_available

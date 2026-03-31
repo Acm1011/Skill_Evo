@@ -363,10 +363,7 @@ class SynthesizerRayTrainer(RayPPOTrainer):
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
-                    if self.config.data.dynamic_topics:
-                        print(f'use dynamic_topics, write raw topics to {self.config.data.topics_path}')
-                        with open(self.config.data.topics_path, 'w', encoding='utf-8') as f:
-                            json.dump(raw_topics, f, indent=4, ensure_ascii=False)
+                   
 
                     progress_bar.close()
                     return
