@@ -31,8 +31,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 SE_CODE_MODULE="${SE_CODE_MODULE:-skill_src}"
 SE_WORKING_DIR="${SE_WORKING_DIR:-$REPO_ROOT}"
-# 与 run_with_gpus.sh 一致：默认同 SE_Synthsizer_DIR（最终 rollout 落盘根目录）
-SE_ROLLOUT_DIR="${SE_ROLLOUT_DIR:-${SE_Synthsizer_DIR:-${SE_BASE_DIR:-/home/ycy/sdi}/Synthsizer}}"
+# 训练流程中由 main.sh 设置 SE_ROLLOUT_DIR；单独起 server 时回退到 skill_saved 下独立目录
+SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
+SE_ROLLOUT_DIR="${SE_ROLLOUT_DIR:-${SE_Synthsizer_DIR:-${SE_SKILL_SAVED_ROOT}/_standalone/Synthesizer}}"
 
 MODEL_CLI=""
 while [[ $# -gt 0 ]]; do

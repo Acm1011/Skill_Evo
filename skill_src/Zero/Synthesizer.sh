@@ -4,7 +4,8 @@
 # =============================================================================
 # 用法（由 main.sh 调用，参数和超参数均通过位置参数 + 环境变量传入）:
 #   ./Synthesizer.sh <exp_name> <synthesizer_model_path> <solver_model_path> \
-#                    <training_steps> <data_file>
+#                    <training_steps> <data_file> [<embedding_cache_path>]
+#   第 6 个参数可选：embedding cache 目录（含 *.meta.json + *.npz）；省略或与 SE_EMBEDDING_CACHE_PATH 均未设置时为空（随机采样）。
 #
 # 流程:
 #   Step 1. 用后半 GPU 启动 rollout server (start_rollout_servers.sh) + 健康检查
@@ -32,12 +33,14 @@ synthesizer_model_path="$2"
 solver_model_path="$3"
 synthesizer_training_steps="$4"
 data_file="$5"
-
+# 可选第 6 参；仅当 $6 未设置时才回退 SE_EMBEDDING_CACHE_PATH；显式传空字符串则保持为空（不传 --embedding-cache-path）
+embedding_cache_path="${6-${SE_EMBEDDING_CACHE_PATH:-}}"
 echo "[exp_name]: ${exp_name}"
 echo "[synthesizer_model_path]: ${synthesizer_model_path}"
 echo "[solver_model_path]: ${solver_model_path}"
 echo "[synthesizer_training_steps]: ${synthesizer_training_steps}"
 echo "[data_file]: ${data_file}"
+echo "[embedding_cache_path]: ${embedding_cache_path}"
 
 # ========================== 验证参数 ==========================
 for var_name in exp_name synthesizer_model_path solver_model_path synthesizer_training_steps data_file; do
@@ -55,10 +58,10 @@ fi
 # ========================== 路径配置（仅派生本脚本特有的） ==========================
 # SE_PROJECT_NAME / SE_WORKING_DIR / SE_Synthsizer_DIR / SE_ROLLOUT_DIR /
 # SE_TENSORBOARD_DIR / SE_CODE_MODULE 等已由 run_with_gpus.sh export
-storage_path="${SE_Synthsizer_DIR}/${exp_name}"
-CKPTS_DIR="${storage_path}/ckpts/"
-tensorboard_path="${SE_TENSORBOARD_DIR}/Synthesizer-${exp_name}"
-mkdir -p "${CKPTS_DIR}" "${tensorboard_path}"
+storage_path="${SE_Synthsizer_DIR}/workspace/${exp_name}"
+CKPTS_DIR="${SE_Synthsizer_DIR}/ckpts/"
+tensorboard_path="${SE_TENSORBOARD_DIR}"
+mkdir -p "${CKPTS_DIR}" "${tensorboard_path}" "${storage_path}"
 export TENSORBOARD_DIR="${tensorboard_path}"
 
 echo "[路径配置] 工作目录: ${SE_WORKING_DIR}"
@@ -139,7 +142,7 @@ done
 echo ""
 echo "========== Step 2: 离线 rollout =========="
 
-OFFLINE_WORK_DIR="${SE_ROLLOUT_DIR}/${exp_name}"
+OFFLINE_WORK_DIR="${storage_path}"
 OFFLINE_MERGE_DIR="${OFFLINE_WORK_DIR}/merged"
 mkdir -p "${OFFLINE_WORK_DIR}" "${OFFLINE_MERGE_DIR}"
 
@@ -147,18 +150,24 @@ echo "  data_file: ${data_file}"
 echo "  steps=${SE_OFFLINE_ROLLOUT_STEPS}  batch=${SE_OFFLINE_ROLLOUT_BATCH_SIZE}  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
 
 cd "${SE_WORKING_DIR}"
-python3 -m ${SE_CODE_MODULE}.solver_offline_driver run \
-    --data-files "${data_file}" \
-    --steps "${SE_OFFLINE_ROLLOUT_STEPS}" \
-    --batch-size "${SE_OFFLINE_ROLLOUT_BATCH_SIZE}" \
-    --work-dir "${OFFLINE_WORK_DIR}" \
-    --merge-output-dir "${OFFLINE_MERGE_DIR}" \
-    --merge-prefix "train_data" \
-    --skill-type "${SE_OFFLINE_SKILL_TYPE}" \
-    --rollout-n "${SE_OFFLINE_ROLLOUT_N}" \
-    --num-random-questions "${SE_OFFLINE_NUM_RANDOM_Q}" \
-    --model-path "${solver_model_path}" \
-    --reset-state || { echo "Error: 离线 rollout 失败"; exit 1; }
+offline_cmd=(
+    python3 -m "${SE_CODE_MODULE}.solver_offline_driver" run
+    --data-files "${data_file}"
+    --steps "${SE_OFFLINE_ROLLOUT_STEPS}"
+    --batch-size "${SE_OFFLINE_ROLLOUT_BATCH_SIZE}"
+    --work-dir "${OFFLINE_WORK_DIR}"
+    --merge-output-dir "${OFFLINE_MERGE_DIR}"
+    --merge-prefix "train_data"
+    --skill-type "${SE_OFFLINE_SKILL_TYPE}"
+    --rollout-n "${SE_OFFLINE_ROLLOUT_N}"
+    --num-random-questions "${SE_OFFLINE_NUM_RANDOM_Q}"
+    --model-path "${solver_model_path}"
+    --reset-state
+)
+if [ -n "$embedding_cache_path" ]; then
+    offline_cmd+=(--embedding-cache-path "${embedding_cache_path}")
+fi
+"${offline_cmd[@]}" || { echo "Error: 离线 rollout 失败"; exit 1; }
 
 echo "离线 rollout 完成"
 

@@ -29,8 +29,9 @@
 #   SE_ROLLOUT_HOST        - Rollout URL 主机（默认 127.0.0.1）
 #   SE_ROLLOUT_SERVER_URLS - 空格分隔，供 driver: --server-urls $SE_ROLLOUT_SERVER_URLS
 #   test-rollout 可选 --model；未传时由 test_solver_rollout.sh 使用 DEFAULT_ROLLOUT_MODEL（见该脚本）
-#   SE_Synthsizer_DIR      - 合成器 / offline rollout 产物根目录（默认 ${SE_WORKING_DIR}/Synthsizer）
-#   SE_ROLLOUT_DIR         - solver_offline_driver 合并结果等默认落盘目录（默认同 SE_Synthsizer_DIR）
+#   SE_SKILL_SAVED_ROOT    - 实验产物根（默认 /home/ycy/sdi/skill_saved）；完整路径由 main.sh 在 exp_name 确定后设置:
+#                             \$SE_SKILL_SAVED_ROOT/<exp_name>/Synthesizer|Solver
+#   SE_Synthsizer_DIR 等   - 训练时由 main.sh export；test-rollout 不经 main 时见各测试脚本内默认
 #   （Ray 临时目录在 main_synthesizer：默认 $SE_RAY_TEMP_ROOT/r-$USER，SE_RAY_TEMP_ROOT 默认 /home/ycy/sdi）
 #
 # =============================================================================
@@ -68,15 +69,10 @@ SE_CODE_MODULE="${SE_CODE_MODULE:-skill_src}"
 SE_WORKING_DIR="${SE_BASE_DIR}/${SE_PROJECT_NAME}"
 SE_MODEL_DIR="${SE_MODEL_DIR:-${SE_BASE_DIR}/models}"
 SE_DATA_DIR="${SE_DATA_DIR:-${SE_BASE_DIR}/data}"
-SE_SAVED_RESULTS_DIR="${SE_SAVED_RESULTS_DIR:-${SE_WORKING_DIR}/saved_results}"
-SE_Synthsizer_DIR="${SE_Synthsizer_DIR:-${SE_SAVED_RESULTS_DIR}/Synthsizer}"
-# offline rollout 最终合并数据、状态等默认放在 Synthsizer 目录下（可被 SE_ROLLOUT_DIR 覆盖）
-SE_ROLLOUT_DIR="${SE_ROLLOUT_DIR:-${SE_Synthsizer_DIR}}"
-SE_Solver_DIR="${SE_Solver_DIR:-${SE_SAVED_RESULTS_DIR}/Solver}"
+SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
 SE_PROMPT_DIR="${SE_WORKING_DIR}/${SE_CODE_MODULE}"
-SE_TENSORBOARD_DIR="${SE_TENSORBOARD_DIR:-${SE_SAVED_RESULTS_DIR}/tensorboard_log}"
-SE_SOLVER_DIR="${SE_SOLVER_DIR:-${SE_SAVED_RESULTS_DIR}/Solver}"
-mkdir -p "${SE_Synthsizer_DIR}" "${SE_ROLLOUT_DIR}" "${SE_TENSORBOARD_DIR}"
+SE_EMBEDDING_CACHE_PATH="${SE_EMBEDDING_CACHE_PATH:-${SE_SKILL_SAVED_ROOT}/embedding_cache}"
+mkdir -p "${SE_SKILL_SAVED_ROOT}"
 # =============================================================================
 # 辅助函数
 # =============================================================================
@@ -341,13 +337,9 @@ setup_gpu_env() {
     export SE_WORKING_DIR
     export SE_MODEL_DIR
     export SE_DATA_DIR
-    export SE_SAVED_RESULTS_DIR
-    export SE_Synthsizer_DIR
-    export SE_ROLLOUT_DIR
-    export SE_SOLVER_DIR
-    export SE_TENSORBOARD_DIR
+    export SE_SKILL_SAVED_ROOT
     export SE_PROMPT_DIR
-    
+    export SE_EMBEDDING_CACHE_PATH
     # 打印配置
     echo ""
     echo "GPU 分配配置:"
@@ -381,8 +373,8 @@ setup_gpu_env() {
     echo "工作目录:          $SE_WORKING_DIR"
     echo "模型目录:          $SE_MODEL_DIR"
     echo "数据目录:          $SE_DATA_DIR"
-    echo "结果保存目录:      $SE_SAVED_RESULTS_DIR"
-    echo "Synthsizer/Rollout: $SE_Synthsizer_DIR  (SE_ROLLOUT_DIR=$SE_ROLLOUT_DIR)"
+    echo "skill_saved 根目录: $SE_SKILL_SAVED_ROOT"
+    echo "  （训练时由 main.sh 设置 SE_SAVED_RESULTS_DIR 等: \$SE_SKILL_SAVED_ROOT/<exp_name>/...）"
     echo "Prompt目录:        $SE_PROMPT_DIR"
     echo "=============================================="
     echo ""

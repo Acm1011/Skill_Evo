@@ -430,6 +430,12 @@ class SynthsizerRewardManager(AbstractRewardManager):
     def __call__(self, data: DataProto, return_dict: bool = False, step: int = 0):
         """We will expand this function gradually based on the available datasets"""
 
+        # RayPPOTrainer 使用 verl.compute_reward 时不传 step；trainer 已在 batch.meta_info 写入 global_steps
+        meta = getattr(data, "meta_info", None) or {}
+        gs = meta.get("global_steps")
+        if gs is not None:
+            step = int(gs)
+
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
         if "rm_scores" in data.batch.keys():
             if return_dict:
@@ -438,7 +444,6 @@ class SynthsizerRewardManager(AbstractRewardManager):
                 return {"reward_tensor": data.batch["rm_scores"], "reward_extra_info": reward_extra_info}
             else:
                 return data.batch["rm_scores"]
-
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
         core_reward_info=[]
@@ -482,8 +487,10 @@ class SynthsizerRewardManager(AbstractRewardManager):
                     "acc": random_q_info["acc"],
                 },
                 "skill_info": {
+                    "skill_type": self.use_skill_type,
                     "is_format": is_skill_format,
                     "skill": skill_or_err,
+                    "raw_skill_str": skill_str,
                 },
             })
         rollout_results = self._solver_use_skill(

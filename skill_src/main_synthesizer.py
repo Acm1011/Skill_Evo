@@ -12,8 +12,9 @@ from omegaconf import OmegaConf
 from skill_src.Synthesizer_dataset import SynthesizerDataset, collate_fn
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+# from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from skill_src.reward import load_reward_manager
+from skill_src.Synthesizer_ray_trainer import SynthesizerRayTrainer
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import is_cuda_available
@@ -245,7 +246,7 @@ class TaskRunner:
         val_dataset = SynthesizerDataset(tokenizer=tokenizer, config=config.data)
         train_sampler = _create_sampler(config.data, train_dataset)
 
-        trainer = RayPPOTrainer(
+        trainer = SynthesizerRayTrainer(
             config=config,
             tokenizer=tokenizer,
             processor=processor,

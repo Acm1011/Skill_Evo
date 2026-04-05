@@ -75,9 +75,10 @@ def _load_model() -> Any:
         f"gpu_memory_utilization={_gpu_memory_utilization})...",
         flush=True,
     )
-    # vLLM 0.18.x 不支持 task= 参数，embedding 模式由模型配置自动推断
+    # task=embed：auto 会把 Qwen3-Embedding 误判为 Qwen3ForCausalLM，加载权重失败（embed_tokens）。
     _model = LLM(
         model=_model_name,
+        task="embed",
         tensor_parallel_size=_tensor_parallel_size,
         gpu_memory_utilization=_gpu_memory_utilization,
     )

@@ -421,10 +421,109 @@ def _ensure_rollout_row_normalized(row: Dict[str, Any]) -> None:
     row.setdefault("reward_model", {})["raw_q_acc"] = row["acc"]
 
 
+def _load_embedding_cache_from_dir(
+    cache_dir: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    从 cache 目录（如 /path/to/embedding_cache）自动发现 ``*.meta.json``，
+    加载并返回 ``(doc_emb, query_emb)``。跳过文件指纹校验（cache 与 data_file
+    可能在不同机器上，路径不同），只做 meta/npz 完整性检查。
+    """
+    cache_path = Path(cache_dir).expanduser().resolve()
+    if not cache_path.is_dir():
+        raise FileNotFoundError(f"embedding_cache_path 不是目录: {cache_path}")
+    metas = sorted(cache_path.glob("*.meta.json"))
+    if not metas:
+        raise FileNotFoundError(f"embedding_cache_path 目录中无 *.meta.json: {cache_path}")
+
+    # 依次尝试，取第一个能成功加载的
+    for meta_fp in metas:
+        suf = ".meta.json"
+        prefix = meta_fp.with_name(meta_fp.name[: -len(suf)])
+        npz_fp = Path(str(prefix) + ".npz")
+        if not npz_fp.is_file():
+            continue
+        try:
+            with meta_fp.open("r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            loaded = np.load(npz_fp)
+            doc = loaded["doc_embeddings"]
+            query = loaded["query_embeddings"]
+        except (OSError, KeyError, ValueError):
+            continue
+        if doc.shape[0] != query.shape[0] or doc.shape[0] == 0:
+            continue
+        num_problems = int(meta.get("num_problems", doc.shape[0]))
+        if num_problems != doc.shape[0]:
+            continue
+        print(
+            f"[driver] 已加载 embedding cache: {meta_fp.name}  "
+            f"num_problems={doc.shape[0]}  dim={doc.shape[1]}"
+        )
+        return doc.astype(np.float32, copy=False), query.astype(np.float32, copy=False)
+
+    raise RuntimeError(
+        f"embedding_cache_path 目录中未找到可用的 (*.meta.json + *.npz) 对: {cache_path}"
+    )
+
+
+def _topk_by_embedding(
+    pos: int,
+    merged: List[Dict[str, Any]],
+    k: int,
+    doc_emb: np.ndarray,
+    query_emb: np.ndarray,
+) -> List[int]:
+    """
+    在本 round merged 列表中（排除 ``pos`` 自身），用 ``merged[pos]["idx"]`` 对应的
+    ``query_emb`` 向量与其余每个 ``merged[j]["idx"]`` 对应的 ``doc_emb`` 向量计算余弦
+    相似度，返回相似度最高的前 ``k`` 个 merged 下标（有序）。
+    idx 越界或 norm 为零时跳过对应候选。
+    """
+    if k <= 0:
+        return []
+    n = len(merged)
+    n_emb = doc_emb.shape[0]
+    try:
+        ci = int(merged[pos]["idx"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    if ci < 0 or ci >= n_emb or ci >= query_emb.shape[0]:
+        return []
+    q_vec = query_emb[ci].astype(np.float64)
+    qn = float(np.linalg.norm(q_vec))
+    if qn < 1e-12:
+        return []
+    q_unit = q_vec / qn
+
+    scored: List[Tuple[float, int]] = []
+    for j in range(n):
+        if j == pos:
+            continue
+        try:
+            cj = int(merged[j]["idx"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if cj < 0 or cj >= n_emb:
+            continue
+        d_vec = doc_emb[cj].astype(np.float64)
+        dn = float(np.linalg.norm(d_vec))
+        if dn < 1e-12:
+            continue
+        scored.append((float(np.dot(d_vec / dn, q_unit)), j))
+
+    scored.sort(key=lambda x: -x[0])
+    return [j for _, j in scored[:k]]
+
+
 def build_merged_rollout_records(
     merged: List[Dict[str, Any]],
     num_random: int,
     skill_type: str,
+    embedding_cache_path: Optional[str] = None,
 ) -> None:
     """
     对 ``merge_shard_jsons`` 的结果原地整理为最终 merged 格式：
@@ -432,6 +531,9 @@ def build_merged_rollout_records(
     - ``num_random_questions > 0`` 且本 round 至少 2 条：从合并列表中随机抽其它样本，
       写入 ``random_questions`` / ``random_q_indices`` / ``reward_model.raw_random_q_acc`` /
       ``extra_info.random_q_info``（与原先 rollout 导出一致）。
+    - 若提供 ``embedding_cache_path``（目录，含 ``*.meta.json`` + ``*.npz``），则用
+      ``merged[pos]["idx"]`` 在 doc/query 向量矩阵中取余弦相似度最高的 ``num_random``
+      个本 round 样本，替代随机采样；字段格式与随机模式完全一致。
     - ``reward_model``：``raw_q_acc``、``raw_random_q_acc``（列表，无对照时为 ``[]``）、
       ``style``、``skill_type``（与历史 merged 一致）。
     - 每条写顶层 skill ``prompt``（get_skill_prompt）。
@@ -439,14 +541,49 @@ def build_merged_rollout_records(
     from skill_src.utils import get_skill_prompt
 
     n = len(merged)
-    k = min(num_random, n - 1) if num_random > 0 and n > 1 else 0
+    path_s = (embedding_cache_path or "").strip()
+    use_emb_cache = bool(path_s)
+    doc_emb: Optional[np.ndarray] = None
+    query_emb: Optional[np.ndarray] = None
+    if use_emb_cache:
+        doc_emb, query_emb = _load_embedding_cache_from_dir(path_s)
+
+    k = 0 if use_emb_cache else (min(num_random, n - 1) if num_random > 0 and n > 1 else 0)
 
     for pos, row in enumerate(merged):
         _ensure_rollout_row_normalized(row)
 
         pick: List[int] = []
         ei = row["extra_info"]
-        if k > 0:
+        if use_emb_cache and doc_emb is not None and query_emb is not None and num_random > 0:
+            k_eff = min(num_random, n - 1) if n > 1 else 0
+            pick = _topk_by_embedding(pos, merged, k_eff, doc_emb, query_emb)
+            if pick:
+                for j in pick:
+                    _ensure_rollout_row_normalized(merged[j])
+
+                dataset_idxs = [merged[j]["idx"] for j in pick]
+                row["random_questions"] = [merged[j]["question"] for j in pick]
+                row["random_q_indices"] = dataset_idxs
+
+                rqi: Dict[str, Any] = {
+                    "indices": dataset_idxs,
+                    "questions": [merged[j]["question"] for j in pick],
+                    "responses": [],
+                    "answers": [],
+                    "gt": [],
+                    "is_right": [],
+                    "acc": [],
+                }
+                for j in pick:
+                    rq = merged[j]["extra_info"]["raw_q_info"]
+                    rqi["responses"].append(rq["responses"])
+                    rqi["answers"].append(rq["answers"])
+                    rqi["gt"].append(rq["gt"])
+                    rqi["is_right"].append(rq["is_right"])
+                    rqi["acc"].append(rq["acc"])
+                ei["random_q_info"] = rqi
+        elif k > 0:
             pool = [j for j in range(n) if j != pos]
             pick = random.sample(pool, k)
             for j in pick:
@@ -456,7 +593,7 @@ def build_merged_rollout_records(
             row["random_questions"] = [merged[j]["question"] for j in pick]
             row["random_q_indices"] = dataset_idxs
 
-            rqi: Dict[str, Any] = {
+            rqi = {
                 "indices": dataset_idxs,
                 "questions": [merged[j]["question"] for j in pick],
                 "responses": [],
@@ -486,7 +623,7 @@ def build_merged_rollout_records(
         rm = row.setdefault("reward_model", {})
         rm["raw_q_acc"] = rq["acc"]
         rm["raw_random_q_acc"] = (
-            [merged[j]["reward_model"]["raw_q_acc"] for j in pick] if k > 0 else []
+            [merged[j]["reward_model"]["raw_q_acc"] for j in pick] if pick else []
         )
         rm.setdefault("style", "rule")
         rm.setdefault("skill_type", skill_type)
@@ -532,7 +669,12 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise ValueError(
             f"需要 len(data) >= steps*batch_size，当前 total_n={total_n}, need={need}"
         )
-    if args.num_random_questions > 0 and need < args.num_random_questions + 1:
+    emb_cache_opt = (getattr(args, "embedding_cache_path", "") or "").strip()
+    if (
+        args.num_random_questions > 0
+        and need < args.num_random_questions + 1
+        and not emb_cache_opt
+    ):
         raise ValueError(
             f"num_random_questions={args.num_random_questions} 需要本 round 样本数 "
             f"steps*batch_size >= num_random+1，当前 need={need}"
@@ -649,7 +791,12 @@ def cmd_run(args: argparse.Namespace) -> None:
             shard_outputs.append((global_base, data))
 
     merged = merge_shard_jsons(shard_outputs)
-    build_merged_rollout_records(merged, num_random, args.skill_type)
+    build_merged_rollout_records(
+        merged,
+        num_random,
+        args.skill_type,
+        embedding_cache_path=emb_cache_opt or None,
+    )
     merge_json = os.path.join(work_dir, f"merged_r{state.cursor}_{new_cursor}.json")
     with open(merge_json, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2, ensure_ascii=False)
@@ -748,6 +895,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--gpu-utilization", type=float, default=0.95)
     run.add_argument("--temperature", type=float, default=1.0)
     run.add_argument("--num-random-questions", type=int, default=10)
+    run.add_argument(
+        "--embedding-cache-path",
+        type=str,
+        default="",
+        help=(
+            "可选：embedding cache 目录（含 *.meta.json + *.npz）；"
+            "用 merged[i][\"idx\"] 查 doc/query 向量，按余弦相似度 top-num_random 替代本 round 随机采样"
+        ),
+    )
     run.add_argument("--request-timeout", type=float, default=86400.0)
     run.add_argument(
         "--model-path",

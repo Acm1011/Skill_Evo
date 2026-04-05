@@ -75,6 +75,15 @@ class SynthesizerRayTrainer(RayPPOTrainer):
         # load checkpoint before doing anything
         self._load_checkpoint()
 
+        if self.global_steps >= self.total_training_steps:
+            print(
+                f"[SynthesizerRayTrainer] global_steps={self.global_steps} >= "
+                f"total_training_steps={self.total_training_steps}: 当前训练步数预算已用尽。"
+                f"请删除或移走 {self.config.trainer.default_local_dir} 下 checkpoint、"
+                f"设置 trainer.resume_mode=disable，或增大 trainer.total_training_steps 后再跑。"
+            )
+            return
+
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
