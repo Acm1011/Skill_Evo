@@ -6,77 +6,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/process_cleanup_lib.sh"
 
 # 直接获取参数
-exp_name="$1"
-challenger_model_path="$2"
-solver_model_path="$3"
-solver_training_steps="$4"
-gen_question_func="$5"
-hybrid_data="$6"
-train_file="$7"
-solver_batch_size="$8"
-real_data_ratio="$9"
-rollout_n="${10}"
-echo "[exp_name]:${exp_name}"
-echo "[challenger_model_path]: ${challenger_model_path}"
-echo "[solver_model_path]: ${solver_model_path}"
-echo "[solver_training_steps]: ${solver_training_steps}"
-echo "[gen_question_func]: ${gen_question_func}"
-echo "[train_file]: ${train_file}"
-echo "[solver_batch_size]: ${solver_batch_size}"
-echo "[real_data_ratio]: ${real_data_ratio}"
-echo "[rollout_n]: ${rollout_n}"
-# 验证参数
-if [ -z "$exp_name" ]; then
-    echo "Error: exp_name 不能为空"
-    exit 1
-fi
+exp_version="$1"
+solver_model_path="$2"
+solver_training_steps="$3"
 
-if [ -z "$challenger_model_path" ]; then
-    echo "Error: challenger_model_path 不能为空"
-    exit 1
-fi
 
-if [ -z "$solver_model_path" ]; then
-    echo "Error: solver_model_path 不能为空"
-    exit 1
-fi
-
-if [ -z "$solver_training_steps" ]; then
-    echo "Error: solver_training_steps 不能为空"
-    exit 1
-fi
-
-# 验证solver_training_steps是否为数字
-if ! [[ "$solver_training_steps" =~ ^[0-9]+$ ]]; then
-    echo "Error: solver_training_steps 必须是数字，当前值: $solver_training_steps"
-    exit 1
-fi
-
-# 验证模型路径是否存在
-if [ ! -d "$challenger_model_path" ]; then
-    echo "Error: challenger_model_path 不存在: $challenger_model_path"
-    exit 1
-fi
-
-if [ ! -d "$solver_model_path" ]; then
-    echo "Error: solver_model_path 不存在: $solver_model_path"
-    exit 1
-fi
-
+training_step=$((${solver_training_steps} + 5))
 # 从环境变量获取路径配置，如果未设置则使用默认值
-project_name="${SE_PROJECT_NAME:-Self-evolving-Agent}"
-dir="${SE_BASE_DIR:-/home/ycy/data1}"
-model_dir="${SE_MODEL_DIR:-${dir}/models}"
-data_dir="${SE_DATA_DIR:-${dir}/data}"
-saved_results_dir="${SE_SAVED_RESULTS_DIR:-${dir}/saved_results}"
-WORKING_DIR="${SE_WORKING_DIR:-${dir}/${project_name}}"
-challenger_path_dir="${SE_CHALLENGER_DIR:-${saved_results_dir}/Challenger}"
-solver_path_dir="${SE_SOLVER_DIR:-${saved_results_dir}/Solver}"
-tensorboard_dir="${SE_TENSORBOARD_DIR:-${saved_results_dir}/tensorboard_log}"
-storage_path=${solver_path_dir}/${exp_name}
+storage_path=${SOLVER_PATH_DIR}/${exp_version}
 CKPTS_DIR=${storage_path}/ckpts/
-tensorboard_path=${tensorboard_dir}/Solver-${exp_name}
-mkdir -p ${CKPTS_DIR} ${tensorboard_path}
+tensorboard_path=${tensorboard_dir}/Solver-${EXP_NAME}-${exp_version}
+mkdir -p ${CKPTS_DIR} ${tensorboard_path} ${storage_path}
 export TENSORBOARD_DIR=${tensorboard_path}
 
 echo "[路径配置] 工作目录: ${WORKING_DIR}"
@@ -97,13 +37,8 @@ export SE_SOLVER_GPUS="${SOLVER_GPUS}"
 export SE_N_SOLVER_GPUS="${N_SOLVER_GPUS}"
 export SE_GEN_QUERY_GPUS="${GEN_QUERY_GPUS}"
 
-gen_query_num=500
-#gen_query_num=8
-echo "开始生成查询数据..."
-bash ${SCRIPT_DIR}/gen_query.sh $exp_name $gen_query_num $challenger_model_path ${challenger_path_dir} ${solver_path_dir} $gen_question_func $hybrid_data $train_file $real_data_ratio || {
-    echo "Error: gen_query.sh failed, exiting..."
-    exit 1
-}
+# 数据生成和准备 python
+
 echo "数据生成完成"
 sleep 10
 adv_estimator=grpo
@@ -115,11 +50,11 @@ clip_ratio_high=0.2
 
 max_prompt_length=$((1024 * 1))
 
-max_response_length=$((1024 * 3))
+max_response_length=$((1024 * 4))
 
 loss_agg_mode="token-mean"
 
-enable_filter_groups=True
+enable_filter_groups=False
 filter_groups_metric=acc
 filter_lower=0.25
 filter_high=0.75
@@ -132,6 +67,7 @@ n_resp_per_prompt=${rollout_n}
 train_prompt_mini_bsz=$((train_prompt_bsz / 2))
 
 # Paths
+# TODO: 训练数据准备， 测试数据准备
 TRAIN_FILE=${storage_path}/train_data.parquet
 TEST_FILE=${data_dir}/ttrl/test_set.parquet
 
@@ -238,10 +174,10 @@ CUDA_VISIBLE_DEVICES=${SOLVER_GPUS} python3 -m ${CODE_MODULE}.main_solver_dapo \
     trainer.experiment_name="Solver-${exp_name}" \
     trainer.n_gpus_per_node=${N_SOLVER_GPUS} \
     trainer.nnodes=1 \
-    trainer.total_training_steps=${solver_training_steps} \
+    trainer.total_training_steps=${training_step} \
     trainer.val_before_train=True \
-    trainer.test_freq=5 \
-    trainer.save_freq=5 \
+    trainer.test_freq=10 \
+    trainer.save_freq=20 \
     trainer.total_epochs=15 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto &

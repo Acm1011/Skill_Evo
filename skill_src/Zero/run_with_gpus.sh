@@ -69,10 +69,12 @@ SE_CODE_MODULE="${SE_CODE_MODULE:-skill_src}"
 SE_WORKING_DIR="${SE_BASE_DIR}/${SE_PROJECT_NAME}"
 SE_MODEL_DIR="${SE_MODEL_DIR:-${SE_BASE_DIR}/models}"
 SE_DATA_DIR="${SE_DATA_DIR:-${SE_BASE_DIR}/data}"
-SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
-SE_PROMPT_DIR="${SE_WORKING_DIR}/${SE_CODE_MODULE}"
-SE_EMBEDDING_CACHE_PATH="${SE_EMBEDDING_CACHE_PATH:-${SE_SKILL_SAVED_ROOT}/embedding_cache}"
-mkdir -p "${SE_SKILL_SAVED_ROOT}"
+SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-${SE_BASE_DIR}/skill_saved}"
+# SE_SYNTHESIZER_DIR="${SE_SYNTHESIZER_DIR:-${SE_SKILL_SAVED_ROOT}/Synthesizer}"
+# SE_SOLVER_DIR="${SE_SOLVER_DIR:-${SE_SKILL_SAVED_ROOT}/Solver}"
+TENSORBOARD_PATH="${TENSORBOARD_PATH:-${SE_SKILL_SAVED_ROOT}/tensorboard_log}"
+
+mkdir -p "${SE_SKILL_SAVED_ROOT}"  "${TENSORBOARD_PATH}"
 # =============================================================================
 # 辅助函数
 # =============================================================================

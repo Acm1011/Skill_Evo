@@ -37,17 +37,20 @@ class VLLMHTTPClient:
         max_retries: int = 3,
         retry_delay: float = 1.0,
         served_model_name: Optional[str] = None,
+        max_concurrent: int = 0,
     ):
         """
         初始化 HTTP 客户端。
         
         Args:
             server_urls: vLLM server URLs 列表，如 ["http://127.0.0.1:8760", ...]
-            timeout: HTTP 请求超时时间（秒）
+            timeout: HTTP 请求超时时间（秒），主要作为 **读超时**（排队+生成整段响应）
             max_retries: 最大重试次数
             retry_delay: 重试延迟（秒）
             served_model_name: /v1/completions 请求体中的 model 名；默认读环境变量
                 VLLM_SERVED_MODEL_NAME 或 SERVED_MODEL_NAME，再退回 "default"（须与 vllm serve --served-model-name 一致）
+            max_concurrent: 同时对 vLLM 发起的 /v1/completions 请求上限；0 表示不限制。
+                多分片并行时每进程各开一批并发，极易把单卡队列撑爆导致 ReadTimeout，建议 16–64。
         """
         if not server_urls:
             raise ValueError("server_urls 不能为空")
@@ -56,6 +59,7 @@ class VLLMHTTPClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.max_concurrent = max(0, int(max_concurrent))
         self._round_robin_idx = 0
         self._client = None
         if served_model_name and str(served_model_name).strip():
@@ -103,12 +107,20 @@ class VLLMHTTPClient:
             返回格式与原 vllm.LLM.generate() 兼容的对象列表
         """
         timeout = request_timeout or self.timeout
-        
-        # 并发为每个 prompt 发送请求
-        tasks = [
-            self._generate_single_async(prompt, sampling_params, timeout)
-            for prompt in prompts
-        ]
+
+        sem: Optional[asyncio.Semaphore] = None
+        if self.max_concurrent > 0:
+            sem = asyncio.Semaphore(self.max_concurrent)
+
+        async def _bounded(p: str) -> Any:
+            if sem is not None:
+                async with sem:
+                    return await self._generate_single_async(
+                        p, sampling_params, timeout
+                    )
+            return await self._generate_single_async(p, sampling_params, timeout)
+
+        tasks = [_bounded(p) for p in prompts]
         completions = await asyncio.gather(*tasks)
         return completions
 
@@ -125,10 +137,17 @@ class VLLMHTTPClient:
             模拟 vllm.RequestOutput 的对象
         """
         last_detail = ""
+        # 读超时覆盖「排队等待 + 生成整段 body」；与 connect/pool 分离避免误杀长推理
+        hx_timeout = httpx.Timeout(
+            connect=60.0,
+            read=timeout,
+            write=120.0,
+            pool=60.0,
+        )
         for attempt in range(self.max_retries):
             url = self._get_next_server()
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx.AsyncClient(timeout=hx_timeout) as client:
                     # OpenAI /v1/completions 的 stop 只能是字符串；整数列表须用 vLLM 扩展字段 stop_token_ids
                     request_body: Dict[str, Any] = {
                         "model": self.served_model_name,
@@ -158,11 +177,22 @@ class VLLMHTTPClient:
                     resp = await client.post(
                         f"{url}/v1/completions",
                         json=request_body,
-                        timeout=timeout,
+                        timeout=hx_timeout,
                     )
 
                     if resp.status_code == 200:
-                        data = resp.json()
+                        try:
+                            data = resp.json()
+                        except Exception as json_err:
+                            # JSON 解析失败（包括空 body）
+                            raw_text = (resp.text or "")[:500]
+                            raise RuntimeError(
+                                f"JSON parse error from {url}: {json_err}. Raw text: {raw_text!r}"
+                            ) from json_err
+                        if data is None:
+                            raise RuntimeError(
+                                f"Empty JSON body from {url} (status 200 but body is None)"
+                            )
                         return _parse_openai_completion_response(data)
                     snippet = (resp.text or "")[:800]
                     last_detail = f"HTTP {resp.status_code} from {url}: {snippet}"
@@ -221,7 +251,7 @@ class MockOutput:
 def _parse_openai_completion_response(response_data: Dict[str, Any]) -> MockRequestOutput:
     """
     将 OpenAI API 的 /v1/completions 响应转换为 vLLM RequestOutput 格式。
-    
+
     OpenAI API 响应格式:
     {
         "id": "...",
@@ -235,12 +265,17 @@ def _parse_openai_completion_response(response_data: Dict[str, Any]) -> MockRequ
         "usage": {...}
     }
     """
+    if response_data is None:
+        raise ValueError("Response JSON is None (empty body or parse error)")
+    if not isinstance(response_data, dict):
+        raise ValueError(f"Response JSON is not a dict: {type(response_data)}")
+
     choices = response_data.get("choices", [])
     if not choices:
-        raise ValueError("Empty choices in response")
-    
+        raise ValueError(f"Empty choices in response: {response_data.keys()}")
+
     # 按 index 排序以保证顺序
     sorted_choices = sorted(choices, key=lambda x: x.get("index", 0))
     texts = [choice.get("text", "") for choice in sorted_choices]
-    
+
     return MockRequestOutput(texts)

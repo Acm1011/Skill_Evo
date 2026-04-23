@@ -13,8 +13,10 @@ from skill_src.utils import INSTRUCTIONS
 import json
 from mathruler.grader import extract_boxed_content, grade_answer
 import os
+import socket
 import time
 import random
+import urllib.error
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import uuid
@@ -22,6 +24,74 @@ from collections import Counter
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from sklearn.cluster import AgglomerativeClustering
 import numpy as np
+
+
+def _retryable_solver_rollout_http_error(e: BaseException) -> bool:
+    """超时或短暂网络错误时可重试；HTTP 业务错误（``RuntimeError`` 等）不重试。"""
+    if isinstance(e, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(e, urllib.error.URLError):
+        r = e.reason
+        if isinstance(r, (TimeoutError, socket.timeout, OSError, ConnectionError)):
+            return True
+        return True
+    if isinstance(e, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        return True
+    return False
+
+
+def _synth_aggregate_reward_details(
+    reward_infos: List[Dict[str, Any]],
+    traj_groups: List[str],
+) -> Dict[str, Any]:
+    """batch 级聚合；空子集对应键为 ``None``（避免 json 非法 nan）。"""
+    n = len(reward_infos)
+    assert len(traj_groups) == n
+
+    def _mean(vals: List[float]) -> Optional[float]:
+        return (float(sum(vals) / len(vals)) if vals else None)
+
+    raw_deltas: List[float] = []
+    rand_deltas: List[float] = []
+    eq_num = 0
+    eq_den = 0
+
+    for i, ri in enumerate(reward_infos):
+        rinf = ri["reward_info"]
+        if not rinf["skill_skipped"] and rinf["raw_q_acc_delta"] is not None:
+            raw_deltas.append(float(rinf["raw_q_acc_delta"]))
+        if not rinf["skill_skipped"] and rinf["random_q_acc_delta"] is not None:
+            rand_deltas.append(float(rinf["random_q_acc_delta"]))
+        if not rinf["skill_skipped"] and rinf["skill_raw_q_acc"] is not None:
+            eq_den += 1
+            if float(rinf["raw_q_acc"]) == float(rinf["skill_raw_q_acc"]):
+                eq_num += 1
+
+    def _group_reward_and_skip_rate(group: str) -> Tuple[Optional[float], Optional[float], int]:
+        idxs = [i for i in range(n) if traj_groups[i] == group]
+        if not idxs:
+            return None, None, 0
+        rews = [float(reward_infos[i]["reward"]) for i in idxs]
+        skips = [bool(reward_infos[i]["reward_info"]["skill_skipped"]) for i in idxs]
+        return _mean(rews), float(sum(skips) / len(skips)), len(idxs)
+
+    r_succ, skip_succ, n_succ = _group_reward_and_skip_rate("success_only")
+    r_mix, skip_mix, n_mix = _group_reward_and_skip_rate("mixed_sf")
+    n_uncls = sum(1 for g in traj_groups if g == "unclassified")
+
+    return {
+        "raw_q_acc_delta_mean": _mean(raw_deltas),
+        "random_q_acc_delta_mean": _mean(rand_deltas),
+        "reward_mean_success_only_traj": r_succ,
+        "reward_mean_mixed_sf_traj": r_mix,
+        "skill_skipped_rate_success_only_traj": skip_succ,
+        "skill_skipped_rate_mixed_sf_traj": skip_mix,
+        "frac_raw_q_acc_eq_skill_raw_q_acc": (float(eq_num) / float(eq_den)) if eq_den else None,
+        "n_success_only_traj": n_succ,
+        "n_mixed_sf_traj": n_mix,
+        "n_prompt_unclassified": n_uncls,
+        "batch_size": n,
+    }
 
 
 def _to_json_serializable(obj: Any) -> Any:
@@ -197,8 +267,10 @@ class SynthsizerRewardManager(AbstractRewardManager):
         storage_path:str="",
         rollout_server_urls: Optional[List[str]] = None,
         rollout_request_timeout: float = 600.0,
+        rollout_http_max_attempts: int = 3,
         use_skill_type: str = "skill_use_v1",
         random_q_coef: float = 0.5,
+        solver_rollout_max_workers: int = 512,
     ) -> None:
         assert storage_path is not None, "storage_path must be provided"
         self.tokenizer = tokenizer
@@ -208,6 +280,22 @@ class SynthsizerRewardManager(AbstractRewardManager):
         self.rollout_request_timeout = rollout_request_timeout
         self.use_skill_type = use_skill_type
         self.random_q_coef = random_q_coef
+        _a = os.environ.get("SYNTH_ROLLOUT_HTTP_MAX_ATTEMPTS", "").strip()
+        if _a:
+            try:
+                self.rollout_http_max_attempts = max(1, int(_a))
+            except ValueError:
+                self.rollout_http_max_attempts = max(1, int(rollout_http_max_attempts))
+        else:
+            self.rollout_http_max_attempts = max(1, int(rollout_http_max_attempts))
+        _w = os.environ.get("SYNTH_SOLVER_ROLLOUT_MAX_WORKERS", "").strip()
+        if _w:
+            try:
+                self.solver_rollout_max_workers = max(1, int(_w))
+            except ValueError:
+                self.solver_rollout_max_workers = max(1, int(solver_rollout_max_workers))
+        else:
+            self.solver_rollout_max_workers = max(1, int(solver_rollout_max_workers))
         os.makedirs(self.storage_path, exist_ok=True)
         
     _SKILL_JSON_KEYS = ("skill name", "problem type", "key insight", "method")
@@ -246,6 +334,14 @@ class SynthsizerRewardManager(AbstractRewardManager):
 
         说明：``solver_offline_rollout_server`` 使用 ``AsyncLLMEngine``，多连接并发由 vLLM 内部队列
         调度；与旧版相比 HTTP 响应及 ``results`` 条目的字段保持一致。
+
+        客户端侧通过 ``ThreadPoolExecutor`` 并发发起 HTTP 请求（I/O 密集，无需多进程）。
+        并发上限为 ``min(合法样本数, solver_rollout_max_workers)``，默认 ``512``，环境变量
+        ``SYNTH_SOLVER_ROLLOUT_MAX_WORKERS`` 可覆盖；也可在 ``reward_model.reward_kwargs`` 中传入
+        ``solver_rollout_max_workers``。
+
+        单次 ``post_rollout`` 在超时或短暂网络失败时会在 ``rollout_http_max_attempts`` 内重试
+        （默认 3 次尝试，含首次），环境变量 ``SYNTH_ROLLOUT_HTTP_MAX_ATTEMPTS`` 可覆盖。
         """
         urls = self.rollout_server_urls
         if not urls:
@@ -327,31 +423,53 @@ class SynthsizerRewardManager(AbstractRewardManager):
                     "temperature": float(os.environ.get("SYNTH_ROLLOUT_TEMPERATURE", "1.0")),
                     "num_random_questions": 0,
                 }
-                payload = post_rollout(
-                    url, body, timeout=self.rollout_request_timeout
-                )
-                # payload: { ok, results: [ { question, responses, answers, gt, is_right, acc }, ... ], ... }
-                return {
-                    "idx": item.get("idx", batch_i),
-                    "step": step,
-                    "skipped": False,
-                    "reason": None,
-                    "server_url": url,
-                    "reward_input": item,
-                    "rollout_response": payload,
-                    "error": None,
-                }
             except Exception as e:
                 return {
                     "idx": item.get("idx", batch_i),
                     "step": step,
                     "skipped": True,
-                    "reason": "http server error_occurred",
+                    "reason": "pack_rollout_body_error",
                     "server_url": url,
                     "reward_input": item,
                     "rollout_response": None,
                     "error": str(e),
                 }
+
+            max_tries = max(1, int(self.rollout_http_max_attempts))
+            last_err: Optional[BaseException] = None
+            for attempt in range(max_tries):
+                try:
+                    payload = post_rollout(
+                        url, body, timeout=self.rollout_request_timeout
+                    )
+                    return {
+                        "idx": item.get("idx", batch_i),
+                        "step": step,
+                        "skipped": False,
+                        "reason": None,
+                        "server_url": url,
+                        "reward_input": item,
+                        "rollout_response": payload,
+                        "error": None,
+                    }
+                except Exception as e:
+                    last_err = e
+                    if not _retryable_solver_rollout_http_error(e):
+                        break
+                    if attempt + 1 >= max_tries:
+                        break
+                    time.sleep(min(2.0, 0.25 * (2**attempt)))
+
+            return {
+                "idx": item.get("idx", batch_i),
+                "step": step,
+                "skipped": True,
+                "reason": "http server error_occurred",
+                "server_url": url,
+                "reward_input": item,
+                "rollout_response": None,
+                "error": str(last_err) if last_err is not None else "unknown",
+            }
 
         n = len(reward_info)
         if n == 0:
@@ -377,7 +495,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
             if item["skill_info"]["is_format"]
         ]
         if eligible:
-            max_workers = min(len(eligible), max(8, len(urls) * 2))
+            max_workers = min(len(eligible), self.solver_rollout_max_workers)
             futs: Dict = {}
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 for job_idx, (i, item) in enumerate(eligible):
@@ -448,15 +566,34 @@ class SynthsizerRewardManager(AbstractRewardManager):
         reward_extra_info = defaultdict(list)
         core_reward_info=[]
         valid_response_lengths=[]
+        traj_prompt_groups: List[str] = []
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
+            extra_info = data_item.non_tensor_batch.get("extra_info")
+            if isinstance(extra_info, np.ndarray) and extra_info.size:
+                extra_info = (
+                    extra_info.item()
+                    if extra_info.ndim == 0
+                    else extra_info.flat[0]
+                )
+            if not isinstance(extra_info, dict):
+                raise KeyError(
+                    f"SynthsizerRewardManager: batch[{i}] extra_info 须为 dict，"
+                    f"实为 {type(extra_info).__name__}"
+                )
+
+            stored = extra_info.get("skill_traj_prompt_group")
+            if stored not in ("success_only", "mixed_sf", "unclassified"):
+                raise KeyError(
+                    f"SynthsizerRewardManager: batch[{i}] extra_info 缺少合法 "
+                    f"skill_traj_prompt_group（须为 success_only | mixed_sf | unclassified），"
+                    f"实为 {stored!r}"
+                )
+            traj_prompt_groups.append(str(stored))
+
             prompt_ids = data_item.batch["prompts"]
-
             prompt_length = prompt_ids.shape[-1]
-
-            #valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
-            #valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch["responses"]
             valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
@@ -470,7 +607,6 @@ class SynthsizerRewardManager(AbstractRewardManager):
             if skill_str.endswith(eos_token):
                 skill_str = skill_str[: -len(eos_token)]
             is_skill_format, skill_or_err = self.check_skill_format(skill_str)
-            extra_info = data_item.non_tensor_batch["extra_info"]
             raw_q_info = extra_info["raw_q_info"]
             random_q_info = extra_info["random_q_info"]
             core_reward_info.append({
@@ -492,6 +628,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
                     "skill": skill_or_err,
                     "raw_skill_str": skill_str,
                 },
+                "traj_prompt_group": traj_prompt_groups[-1],
             })
         rollout_results = self._solver_use_skill(
             core_reward_info, storage_path=self.storage_path, step=step
@@ -547,6 +684,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
                 "raw_q_info": core_reward_info[i]["raw_q_info"],
                 "random_q_info": core_reward_info[i]["random_q_info"],
                 "skill_info": core_reward_info[i]["skill_info"],
+                "traj_prompt_group": core_reward_info[i]["traj_prompt_group"],
                 "rollout_result": rollout_result,
                 "reward": reward,
                 "reward_info": {
@@ -560,13 +698,21 @@ class SynthsizerRewardManager(AbstractRewardManager):
                     "reward": reward,
                 },
             })
+        reward_details = _synth_aggregate_reward_details(
+            reward_infos, [core_reward_info[i]["traj_prompt_group"] for i in range(len(core_reward_info))]
+        )
+        bs = len(reward_infos)
+        reward_extra_info["reward_details"] = [reward_details] * bs
+
         reward_info_path_dir = f"{self.storage_path}/reward_info/"
         os.makedirs(reward_info_path_dir, exist_ok=True)
         with open(os.path.join(reward_info_path_dir, f"exp_data_step_{str(step).zfill(3)}.jsonl"), "w", encoding="utf-8") as f:
             for reward_info in reward_infos:
+                row = dict(reward_info)
+                row["reward_details"] = reward_details
                 f.write(
                     json.dumps(
-                        _to_json_serializable(reward_info),
+                        _to_json_serializable(row),
                         ensure_ascii=False,
                     )
                     + "\n"

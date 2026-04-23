@@ -144,22 +144,76 @@ def custom_grade_answer(solution_str: str, gt) -> bool:
 
     return correct
  
+def order_responses_for_skill(
+    rsps: List[str], is_right: List[bool]
+) -> Optional[Tuple[List[str], List[bool]]]:
+    """
+    为 skill 模板重排轨迹：至少需一条正确；全错返回 ``None``。
+    同时含对与错时，优先将「第一个 [SUCCESS]」与「第一个 [FAIL]」置于列表前两位，
+    其余按原下标顺序接在后面；全对时保持原顺序。
+    """
+    n = len(rsps)
+    if n == 0 or n != len(is_right):
+        return None
+    if not any(is_right):
+        return None
+    fail_i = next((i for i in range(n) if not is_right[i]), None)
+    if fail_i is None:
+        order = list(range(n))
+    else:
+        succ_i = next(i for i in range(n) if is_right[i])
+        head = [succ_i, fail_i]
+        rest = [i for i in range(n) if i not in (succ_i, fail_i)]
+        order = head + rest
+    return [rsps[i] for i in order], [is_right[i] for i in order]
+
+
+def skill_traj_prompt_group_from_is_right(is_right: Any) -> str:
+    """
+    与 ``get_skill_prompt`` 中 ``[SUCCESS]`` / ``[FAIL]`` 前缀一致：由 raw 轨迹 ``is_right`` 判定。
+    返回值供 ``extra_info`` 与 ``SynthsizerRewardManager`` 使用；与字符串分类 ``success_only`` /
+    ``mixed_sf`` / ``unclassified`` 对齐。
+    """
+    if is_right is None:
+        return "unclassified"
+    if isinstance(is_right, np.ndarray):
+        is_right = is_right.ravel().tolist()
+    elif not isinstance(is_right, (list, tuple)):
+        return "unclassified"
+    if len(is_right) == 0:
+        return "unclassified"
+    rights = [bool(x) for x in is_right]
+    if not any(rights):
+        return "unclassified"
+    if all(rights):
+        return "success_only"
+    return "mixed_sf"
+
+
 # TODO: add more skill types
-def get_skill_prompt(q: str,rsps: List[str],is_right: List[bool], skill_type: str) -> str:
+def get_skill_prompt(
+    q: str, rsps: List[str], is_right: List[bool], skill_type: str
+) -> str:
     """
     input:
         q: str, the question
         rsps: List[str], the responses
         is_right: List[bool], the is_right of the responses
         skill_type: str, the type of the skill
-    return:str, the prompt for the skill synthesizer model
+    return: str, the prompt for the skill synthesizer model
+
+    全错时抛出 ``ValueError``（调用方应先过滤或勿调用）。
     """
+    ordered = order_responses_for_skill(rsps, is_right)
+    if ordered is None:
+        raise ValueError("get_skill_prompt 需要至少一条正确轨迹（不可全为 FAIL）")
+    rsps_o, right_o = ordered
     prompt_path = os.path.join(os.path.dirname(__file__), "prompt", f"{skill_type}.txt")
     with open(prompt_path, "r", encoding="utf-8") as f:
         skills_prompt_base = f.read()
     trajectories = []
-    for rsp, is_right in zip(rsps, is_right):
-        if is_right:
+    for rsp, ir in zip(rsps_o, right_o):
+        if ir:
             trajectories.append(f"[SUCCESS] {rsp}")
         else:
             trajectories.append(f"[FAIL] {rsp}")
@@ -909,6 +963,16 @@ def _test_get_skill_prompt() -> None:
     assert "[SUCCESS]" in out and "\\boxed{4}" in out, "应包含成功轨迹"
     assert "[FAIL]" in out and "\\boxed{3}" in out, "应包含失败轨迹"
     assert "Group trajectories:" in out, "应保留模板结构"
+    pos_s = out.find("[SUCCESS]")
+    pos_f = out.find("[FAIL]")
+    assert pos_s != -1 and pos_f != -1 and pos_s < pos_f, "混合时应先 SUCCESS 再 FAIL"
+    only_ok = get_skill_prompt(q, ["\\boxed{4}", "\\boxed{5}"], [True, True], "skill_generation_v1")
+    assert only_ok.count("[SUCCESS]") == 2 and "[FAIL]" not in only_ok
+    try:
+        get_skill_prompt(q, ["\\boxed{3}"], [False], "skill_generation_v1")
+        raise AssertionError("全错应抛 ValueError")
+    except ValueError:
+        pass
     print("get_skill_prompt: OK")
 
 

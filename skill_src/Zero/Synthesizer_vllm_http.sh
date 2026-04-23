@@ -24,6 +24,9 @@
 #       传给每卡 rollout_http_client（调 vLLM /v1/completions），默认 600s / 8 / 2
 #   SERVED_MODEL_NAME     与 vllm serve --served-model-name 一致，默认 default（须与 vllm_http_client 一致）
 #   VLLM_DTYPE            传给 vllm serve，默认 auto
+#   SE_PREBUILT_ROLLOUT_PATH  预生成的 rollout 文件路径（jsonl 或 parquet）
+#       若设置且文件存在，将跳过离线 rollout 阶段（Step 1a/1b/2），直接使用该文件进行 RL 训练
+#       此时仅后半卡启动 vLLM + client 供 reward 评估使用
 #
 # 注意:
 #   - 勿对 solver_offline_driver 使用 --shutdown-servers-after-run：会按 URL 端口误杀 http client。
@@ -42,12 +45,14 @@ solver_model_path="$3"
 synthesizer_training_steps="$4"
 data_file="$5"
 embedding_cache_path="${6-${SE_EMBEDDING_CACHE_PATH:-}}"
+prebuilt_rollout_path="${SE_PREBUILT_ROLLOUT_PATH:-}"
 echo "[exp_name]: ${exp_name}"
 echo "[synthesizer_model_path]: ${synthesizer_model_path}"
 echo "[solver_model_path]: ${solver_model_path}"
 echo "[synthesizer_training_steps]: ${synthesizer_training_steps}"
 echo "[data_file]: ${data_file}"
 echo "[embedding_cache_path]: ${embedding_cache_path}"
+echo "[prebuilt_rollout_path]: ${prebuilt_rollout_path}"
 
 # ========================== 验证参数 ==========================
 for var_name in exp_name synthesizer_model_path solver_model_path synthesizer_training_steps data_file; do
@@ -140,10 +145,31 @@ cleanup_all() {
 trap cleanup_all EXIT INT TERM
 
 # ===========================================================================
-# Step 1a: 全部 GPU 启动 vllm serve
+# 判断是否使用预生成 rollout 文件
+# ===========================================================================
+USE_PREBUILT_ROLLOUT=false
+if [ -n "$prebuilt_rollout_path" ] && [ -f "$prebuilt_rollout_path" ]; then
+    USE_PREBUILT_ROLLOUT=true
+    echo ""
+    echo "========== 检测到预生成 rollout 文件，将跳过离线 rollout 阶段 =========="
+    echo "  预生成文件: ${prebuilt_rollout_path}"
+fi
+
+# ===========================================================================
+# Step 1a: 启动 vllm serve
 # ===========================================================================
 echo ""
-echo "========== Step 1a: 启动 vLLM HTTP servers（全卡）=========="
+if [ "$USE_PREBUILT_ROLLOUT" = true ]; then
+    echo "========== Step 1a: 启动 vLLM HTTP servers（仅后半卡，供 reward 评估）=========="
+    # 仅后半 GPU 需要启动
+    ROLLOUT_ONLY_GPU_IDS="${ROLLOUT_GPU_IDS}"
+    N_VLLM_SERVERS="${N_ROLLOUT_SERVERS}"
+else
+    echo "========== Step 1a: 启动 vLLM HTTP servers（全卡）=========="
+    # 全部 GPU 需要启动
+    ROLLOUT_ONLY_GPU_IDS="${SE_GPU_IDS}"
+    N_VLLM_SERVERS="${SE_N_GPUS}"
+fi
 
 cd "${SE_WORKING_DIR}"
 if [[ -z "${PYTHONPATH:-}" ]]; then
@@ -154,12 +180,12 @@ fi
 
 export BASE_PORT="${VLLM_HTTP_BASE_PORT}"
 export DTYPE="${VLLM_DTYPE:-auto}"
-bash "${START_VLLM_SH}" "${SE_GPU_IDS}" "${solver_model_path}" &
+bash "${START_VLLM_SH}" "${ROLLOUT_ONLY_GPU_IDS}" "${solver_model_path}" &
 VLLM_LAUNCHER_PID=$!
 echo "vLLM 启动脚本 PID: ${VLLM_LAUNCHER_PID}"
 
 MAX_WAIT=600
-for ((i=0; i<SE_N_GPUS; i++)); do
+for ((i=0; i<N_VLLM_SERVERS; i++)); do
     port=$((VLLM_HTTP_BASE_PORT + i))
     waited=0
     while [ $waited -lt $MAX_WAIT ]; do
@@ -174,9 +200,9 @@ for ((i=0; i<SE_N_GPUS; i++)); do
     fi
 done
 
-# 所有 rollout_http_client 进程共享同一份 vLLM URL 列表，重试时可轮询到其它 GPU 上的 vLLM（单 URL 时重试仍打同一台，易 500）
+# 构建 vLLM URLs CSV（仅后半卡或全卡）
 VLLM_URLS_CSV=""
-for ((i=0; i<SE_N_GPUS; i++)); do
+for ((i=0; i<N_VLLM_SERVERS; i++)); do
     vport=$((VLLM_HTTP_BASE_PORT + i))
     VLLM_URLS_CSV="${VLLM_URLS_CSV:+$VLLM_URLS_CSV,}http://127.0.0.1:${vport}"
 done
@@ -185,13 +211,17 @@ VLLM_HTTP_MAX_RETRIES="${VLLM_HTTP_MAX_RETRIES:-8}"
 VLLM_HTTP_RETRY_DELAY="${VLLM_HTTP_RETRY_DELAY:-2}"
 
 # ===========================================================================
-# Step 1b: 每卡一个 solver_offline_rollout_http_client
+# Step 1b: 启动 solver_offline_rollout_http_client
 # ===========================================================================
 echo ""
-echo "========== Step 1b: 启动 solver_offline_rollout_http_client（每卡）=========="
+if [ "$USE_PREBUILT_ROLLOUT" = true ]; then
+    echo "========== Step 1b: 启动 solver_offline_rollout_http_client（仅后半卡，供 reward）=========="
+else
+    echo "========== Step 1b: 启动 solver_offline_rollout_http_client（每卡）=========="
+fi
 echo "  [vLLM HTTP] 每进程 --vllm-urls 相同（故障转移） timeout=${VLLM_HTTP_TIMEOUT}s max_retries=${VLLM_HTTP_MAX_RETRIES} retry_delay=${VLLM_HTTP_RETRY_DELAY}s"
 
-for ((i=0; i<SE_N_GPUS; i++)); do
+for ((i=0; i<N_VLLM_SERVERS; i++)); do
     vport=$((VLLM_HTTP_BASE_PORT + i))
     cport=$((ROLLOUT_HTTP_BASE_PORT + i))
     log="${LOG_DIR}/rollout_http_client_${i}_v${vport}_p${cport}.log"
@@ -208,7 +238,7 @@ for ((i=0; i<SE_N_GPUS; i++)); do
     HTTP_CLIENT_PIDS+=($!)
 done
 
-for ((i=0; i<SE_N_GPUS; i++)); do
+for ((i=0; i<N_VLLM_SERVERS; i++)); do
     cport=$((ROLLOUT_HTTP_BASE_PORT + i))
     waited=0
     while [ $waited -lt $MAX_WAIT ]; do
@@ -228,77 +258,94 @@ unset SE_ROLLOUT_N_SERVERS
 unset SE_ROLLOUT_PORTS
 export ROLLOUT_SERVER_MODEL="${solver_model_path}"
 
-_rollout_urls_all=""
-for ((i=0; i<SE_N_GPUS; i++)); do
-    cport=$((ROLLOUT_HTTP_BASE_PORT + i))
-    _rollout_urls_all="${_rollout_urls_all:+${_rollout_urls_all} }http://${SE_ROLLOUT_HOST}:${cport}"
-done
-export SE_ROLLOUT_SERVER_URLS="${_rollout_urls_all}"
-echo "[env] Step 2 SE_ROLLOUT_SERVER_URLS=${SE_ROLLOUT_SERVER_URLS}"
-
 # ===========================================================================
-# Step 2: 离线 rollout
+# Step 2: 离线 rollout（仅在未使用预生成文件时执行）
 # ===========================================================================
-echo ""
-echo "========== Step 2: 离线 rollout =========="
+if [ "$USE_PREBUILT_ROLLOUT" = true ]; then
+    echo ""
+    echo "========== Step 2: 使用预生成 rollout 文件，跳过离线 rollout =========="
+    TRAIN_DATA_FILE="${prebuilt_rollout_path}"
+    echo "  训练数据: ${TRAIN_DATA_FILE}"
+    
+    # 设置 SE_ROLLOUT_SERVER_URLS 为后半卡（用于 reward 评估）
+    _rollout_urls_tail=""
+    for ((i=0; i<N_ROLLOUT_SERVERS; i++)); do
+        cport=$((ROLLOUT_HTTP_BASE_PORT + i))
+        _rollout_urls_tail="${_rollout_urls_tail:+${_rollout_urls_tail} }http://${SE_ROLLOUT_HOST}:${cport}"
+    done
+    export SE_ROLLOUT_SERVER_URLS="${_rollout_urls_tail}"
+    echo "[env] Step 3 SE_ROLLOUT_SERVER_URLS=${SE_ROLLOUT_SERVER_URLS}"
+else
+    # 原有完整流程
+    _rollout_urls_all=""
+    for ((i=0; i<SE_N_GPUS; i++)); do
+        cport=$((ROLLOUT_HTTP_BASE_PORT + i))
+        _rollout_urls_all="${_rollout_urls_all:+${_rollout_urls_all} }http://${SE_ROLLOUT_HOST}:${cport}"
+    done
+    export SE_ROLLOUT_SERVER_URLS="${_rollout_urls_all}"
+    echo "[env] Step 2 SE_ROLLOUT_SERVER_URLS=${SE_ROLLOUT_SERVER_URLS}"
 
-OFFLINE_WORK_DIR="${storage_path}"
-OFFLINE_MERGE_DIR="${OFFLINE_WORK_DIR}/merged"
-mkdir -p "${OFFLINE_WORK_DIR}" "${OFFLINE_MERGE_DIR}"
+    echo ""
+    echo "========== Step 2: 离线 rollout =========="
 
-echo "  data_file: ${data_file}"
-echo "  steps=${SE_OFFLINE_ROLLOUT_STEPS}  batch=${SE_OFFLINE_ROLLOUT_BATCH_SIZE}  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
+    OFFLINE_WORK_DIR="${storage_path}"
+    OFFLINE_MERGE_DIR="${OFFLINE_WORK_DIR}/merged"
+    mkdir -p "${OFFLINE_WORK_DIR}" "${OFFLINE_MERGE_DIR}"
 
-offline_cmd=(
-    "${PYTHON}" -m "${SE_CODE_MODULE}.solver_offline_driver" run
-    --data-files "${data_file}"
-    --steps "${SE_OFFLINE_ROLLOUT_STEPS}"
-    --batch-size "${SE_OFFLINE_ROLLOUT_BATCH_SIZE}"
-    --work-dir "${OFFLINE_WORK_DIR}"
-    --merge-output-dir "${OFFLINE_MERGE_DIR}"
-    --merge-prefix "train_data"
-    --skill-type "${SE_OFFLINE_SKILL_TYPE}"
-    --rollout-n "${SE_OFFLINE_ROLLOUT_N}"
-    --num-random-questions "${SE_OFFLINE_NUM_RANDOM_Q}"
-    --model-path "${solver_model_path}"
-    --reset-state
-)
-if [ -n "$embedding_cache_path" ]; then
-    offline_cmd+=(--embedding-cache-path "${embedding_cache_path}")
-fi
-"${offline_cmd[@]}" || { echo "Error: 离线 rollout 失败"; exit 1; }
+    echo "  data_file: ${data_file}"
+    echo "  steps=${SE_OFFLINE_ROLLOUT_STEPS}  batch=${SE_OFFLINE_ROLLOUT_BATCH_SIZE}  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
 
-echo "离线 rollout 完成"
-
-TRAIN_DATA_FILE="${OFFLINE_MERGE_DIR}/train_data.parquet"
-[ -f "${TRAIN_DATA_FILE}" ] || TRAIN_DATA_FILE="${OFFLINE_MERGE_DIR}/train_data.jsonl"
-[ -f "${TRAIN_DATA_FILE}" ] || { echo "Error: 未找到训练数据"; exit 1; }
-echo "训练数据: ${TRAIN_DATA_FILE}"
-
-# ===========================================================================
-# Step 2.5: 释放前半 GPU（与 Synthesizer 训练用卡一致）
-# ===========================================================================
-echo ""
-echo "========== Step 2.5: 结束前半卡 vLLM 与 rollout_http_client（释放 Synthesizer GPU）=========="
-
-for ((i=0; i<SE_N_GPUS; i++)); do
-    if [ "$i" -lt "$HALF" ]; then
-        vp=$((VLLM_HTTP_BASE_PORT + i))
-        cp=$((ROLLOUT_HTTP_BASE_PORT + i))
-        echo "  释放索引 i=${i}（物理 GPU ${ALL_GPUS[$i]}）: 结束 vLLM 端口 ${vp}、client 端口 ${cp}"
-        lsof -ti:"${vp}" | xargs -r kill -15 || true
-        lsof -ti:"${cp}" | xargs -r kill -15 || true
+    offline_cmd=(
+        "${PYTHON}" -m "${SE_CODE_MODULE}.solver_offline_driver" run
+        --data-files "${data_file}"
+        --steps "${SE_OFFLINE_ROLLOUT_STEPS}"
+        --batch-size "${SE_OFFLINE_ROLLOUT_BATCH_SIZE}"
+        --work-dir "${OFFLINE_WORK_DIR}"
+        --merge-output-dir "${OFFLINE_MERGE_DIR}"
+        --merge-prefix "train_data"
+        --skill-type "${SE_OFFLINE_SKILL_TYPE}"
+        --rollout-n "${SE_OFFLINE_ROLLOUT_N}"
+        --num-random-questions "${SE_OFFLINE_NUM_RANDOM_Q}"
+        --model-path "${solver_model_path}"
+        --reset-state
+    )
+    if [ -n "$embedding_cache_path" ]; then
+        offline_cmd+=(--embedding-cache-path "${embedding_cache_path}")
     fi
-done
-sleep 3
+    "${offline_cmd[@]}" || { echo "Error: 离线 rollout 失败"; exit 1; }
 
-_rollout_urls_tail=""
-for ((i=HALF; i<SE_N_GPUS; i++)); do
-    cport=$((ROLLOUT_HTTP_BASE_PORT + i))
-    _rollout_urls_tail="${_rollout_urls_tail:+${_rollout_urls_tail} }http://${SE_ROLLOUT_HOST}:${cport}"
-done
-export SE_ROLLOUT_SERVER_URLS="${_rollout_urls_tail}"
-echo "[env] Step 3 SE_ROLLOUT_SERVER_URLS=${SE_ROLLOUT_SERVER_URLS}"
+    echo "离线 rollout 完成"
+
+    TRAIN_DATA_FILE="${OFFLINE_MERGE_DIR}/train_data.parquet"
+    [ -f "${TRAIN_DATA_FILE}" ] || TRAIN_DATA_FILE="${OFFLINE_MERGE_DIR}/train_data.jsonl"
+    [ -f "${TRAIN_DATA_FILE}" ] || { echo "Error: 未找到训练数据"; exit 1; }
+    echo "训练数据: ${TRAIN_DATA_FILE}"
+
+    # ===========================================================================
+    # Step 2.5: 释放前半 GPU（与 Synthesizer 训练用卡一致）
+    # ===========================================================================
+    echo ""
+    echo "========== Step 2.5: 结束前半卡 vLLM 与 rollout_http_client（释放 Synthesizer GPU）=========="
+
+    for ((i=0; i<SE_N_GPUS; i++)); do
+        if [ "$i" -lt "$HALF" ]; then
+            vp=$((VLLM_HTTP_BASE_PORT + i))
+            cp=$((ROLLOUT_HTTP_BASE_PORT + i))
+            echo "  释放索引 i=${i}（物理 GPU ${ALL_GPUS[$i]}）: 结束 vLLM 端口 ${vp}、client 端口 ${cp}"
+            lsof -ti:"${vp}" | xargs -r kill -15 || true
+            lsof -ti:"${cp}" | xargs -r kill -15 || true
+        fi
+    done
+    sleep 3
+
+    _rollout_urls_tail=""
+    for ((i=HALF; i<SE_N_GPUS; i++)); do
+        cport=$((ROLLOUT_HTTP_BASE_PORT + i))
+        _rollout_urls_tail="${_rollout_urls_tail:+${_rollout_urls_tail} }http://${SE_ROLLOUT_HOST}:${cport}"
+    done
+    export SE_ROLLOUT_SERVER_URLS="${_rollout_urls_tail}"
+    echo "[env] Step 3 SE_ROLLOUT_SERVER_URLS=${SE_ROLLOUT_SERVER_URLS}"
+fi
 
 # ===========================================================================
 # Step 3: Synthesizer RL 训练

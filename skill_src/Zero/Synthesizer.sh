@@ -28,20 +28,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/process_cleanup_lib.sh"
 
 # ========================== 解析位置参数 ==========================
-exp_name="$1"
+exp_version="$1"
 synthesizer_model_path="$2"
 solver_model_path="$3"
 synthesizer_training_steps="$4"
 data_file="$5"
-# 可选第 6 参；仅当 $6 未设置时才回退 SE_EMBEDDING_CACHE_PATH；显式传空字符串则保持为空（不传 --embedding-cache-path）
-embedding_cache_path="${6-${SE_EMBEDDING_CACHE_PATH:-}}"
+# 可选第 7 参；仅当 $7 未设置时才回退 SE_EMBEDDING_CACHE_PATH；显式传空字符串则保持为空（不传 --embedding-cache-path）
+embedding_cache_path="${7-${SE_EMBEDDING_CACHE_PATH:-}}"
 echo "[exp_name]: ${exp_name}"
-echo "[synthesizer_model_path]: ${synthesizer_model_path}"
-echo "[solver_model_path]: ${solver_model_path}"
-echo "[synthesizer_training_steps]: ${synthesizer_training_steps}"
-echo "[data_file]: ${data_file}"
-echo "[embedding_cache_path]: ${embedding_cache_path}"
-
+echo "[version]: ${version}"
 # ========================== 验证参数 ==========================
 for var_name in exp_name synthesizer_model_path solver_model_path synthesizer_training_steps data_file; do
     if [ -z "${!var_name}" ]; then
@@ -54,15 +49,12 @@ fi
 [ -d "$synthesizer_model_path" ] || { echo "Error: synthesizer_model_path 不存在: $synthesizer_model_path"; exit 1; }
 [ -d "$solver_model_path" ]      || { echo "Error: solver_model_path 不存在: $solver_model_path"; exit 1; }
 [ -f "$data_file" ]              || { echo "Error: data_file 不存在: $data_file"; exit 1; }
-
-# ========================== 路径配置（仅派生本脚本特有的） ==========================
-# SE_PROJECT_NAME / SE_WORKING_DIR / SE_Synthsizer_DIR / SE_ROLLOUT_DIR /
-# SE_TENSORBOARD_DIR / SE_CODE_MODULE 等已由 run_with_gpus.sh export
-storage_path="${SE_Synthsizer_DIR}/workspace/${exp_name}"
-CKPTS_DIR="${SE_Synthsizer_DIR}/ckpts/"
-tensorboard_path="${SE_TENSORBOARD_DIR}"
-mkdir -p "${CKPTS_DIR}" "${tensorboard_path}" "${storage_path}"
-export TENSORBOARD_DIR="${tensorboard_path}"
+training_step=$((${synthesizer_training_steps} + 5))
+storage_path=${SYNTHESIZER_PATH_DIR}/${exp_version}
+CKPTS_DIR=${storage_path}/ckpts/
+tensorboard_path=${TENSORBOARD_PATH}/Synthesizer-${EXP_NAME}-${exp_version}
+mkdir -p ${CKPTS_DIR} ${tensorboard_path} 
+export TENSORBOARD_DIR=${tensorboard_path}
 
 echo "[路径配置] 工作目录: ${SE_WORKING_DIR}"
 echo "[路径配置] 存储路径: ${storage_path}"
@@ -248,11 +240,11 @@ CUDA_VISIBLE_DEVICES=${SYNTH_GPU_IDS} python3 -m ${SE_CODE_MODULE}.main_synthesi
     trainer.project_name="${SE_PROJECT_NAME}" \
     trainer.experiment_name="Synthesizer-${exp_name}" \
     trainer.n_gpus_per_node=${N_SYNTH_GPUS} \
-    trainer.total_training_steps=${synthesizer_training_steps} \
+    trainer.total_training_steps=${training_step} \
     trainer.nnodes=1 \
     trainer.val_before_train=False \
     trainer.default_local_dir=${CKPTS_DIR} \
-    trainer.save_freq=${synthesizer_training_steps} \
+    trainer.save_freq=${training_step} \
     trainer.test_freq=-1 \
     trainer.total_epochs=15 &
 

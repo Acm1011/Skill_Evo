@@ -15,7 +15,11 @@
   # 游标状态默认写入 {work_dir}/train_cursor_state.json；也可用 --state-path 指定
 
   默认将本分片样本以 JSON（data_records）POST 到各 server，结果从响应体收集，不落临时分片盘。
-  合并后 ``build_merged_rollout_records``：对本 round 全量列表做 random 采样并拼好 merged 格式（顶层 skill prompt 等）。
+  合并后 ``enrich_merged_rows_from_dataset`` + ``build_merged_rollout_records``：
+  回填 ``topic``/``difficulty`` 后做 random / embedding 对照题并拼好 merged 格式（顶层 skill prompt 等）。
+  ``run`` 使用 ``--rollout-multiplier``（默认 2）放大 server 侧 rollout 次数；全错样本丢弃，
+  有效条数不足时自动多波 rollout，游标按本轮实际消费的原始样本总数推进。
+  每波分片请求用 ``ThreadPoolExecutor``（默认 ``--rollout-max-workers`` 512，实际并发不超过分片数）。
   若需旧版「写 shard jsonl + 读返回路径」可加 --shard-via-disk。
 
   若 server 由 shell 提前启动，可在成功后释放一半 GPU 供后续 RL：
@@ -36,7 +40,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -405,6 +409,31 @@ def merge_shard_jsons(
     return merged
 
 
+def enrich_merged_rows_from_dataset(
+    merged: List[Dict[str, Any]],
+    records: List[Dict[str, Any]],
+) -> None:
+    """
+    Rollout 结果不含原始 ``extra_info``；按 ``row[\"idx\"]`` 从数据集记录回填
+    ``topic`` / ``difficulty`` 等，供 DeepMath 风格 random-q 池化使用。
+    """
+    n_rec = len(records)
+    for row in merged:
+        try:
+            idx = int(row["idx"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if idx < 0 or idx >= n_rec:
+            continue
+        src_ei = records[idx].get("extra_info")
+        if not isinstance(src_ei, dict):
+            continue
+        ei = row.setdefault("extra_info", {})
+        for key in ("topic", "difficulty", "split", "problem"):
+            if key in src_ei:
+                ei[key] = src_ei[key]
+
+
 def _ensure_rollout_row_normalized(row: Dict[str, Any]) -> None:
     """将单条 rollout 扁平字段（question, responses, …）整理为 extra_info.raw_q_info 等。"""
     ei = row.setdefault("extra_info", {})
@@ -470,18 +499,241 @@ def _load_embedding_cache_from_dir(
     )
 
 
+def _row_rollout_acc(row: Dict[str, Any]) -> float:
+    """单条 rollout 的 ``acc``（多 completion 正确率，0~1）；缺省回退 1.0（不当作难题）。"""
+    v: Any = row.get("acc")
+    if v is None:
+        ei = row.get("extra_info") or {}
+        rqi = ei.get("raw_q_info") or {}
+        v = rqi.get("acc")
+    if v is None:
+        return 1.0
+    try:
+        if isinstance(v, (np.integer, np.floating)):
+            return float(v)
+        return float(v)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _weighted_sample_pool_indices(
+    pool: List[int],
+    k_take: int,
+    merged: List[Dict[str, Any]],
+    prefer_low_acc: bool,
+) -> List[int]:
+    """
+    从 ``pool`` 无放回抽 ``k_take`` 个 merged 下标。
+
+    ``prefer_low_acc`` 时：至少 ``ceil(k_take/2)`` 条按权重 ∝ (1-acc)+eps 抽取（低 acc），
+    其余在剩余池中均匀随机。
+    """
+    if k_take <= 0 or not pool:
+        return []
+    k_take = min(k_take, len(pool))
+    if not prefer_low_acc:
+        return random.sample(pool, k_take)
+    k_low = (k_take + 1) // 2
+    k_rand = k_take - k_low
+    eps = 1e-6
+    remaining = list(pool)
+    low_pick: List[int] = []
+    for _ in range(k_low):
+        if not remaining:
+            break
+        weights = [
+            max(0.0, (1.0 - _row_rollout_acc(merged[j])) + eps) for j in remaining
+        ]
+        s = float(sum(weights))
+        if s <= 0:
+            pick_j = random.choice(remaining)
+        else:
+            pick_j = random.choices(
+                remaining, weights=[w / s for w in weights], k=1
+            )[0]
+        low_pick.append(pick_j)
+        remaining.remove(pick_j)
+    rand_pick: List[int] = []
+    if k_rand > 0 and remaining:
+        rand_pick = random.sample(remaining, min(k_rand, len(remaining)))
+    return low_pick + rand_pick
+
+
+_TOPIC_SEP = " -> "
+
+
+def _topic_parent(topic: Optional[str]) -> Optional[str]:
+    if not topic or not isinstance(topic, str):
+        return None
+    parts = [p.strip() for p in topic.split(_TOPIC_SEP)]
+    if len(parts) <= 1:
+        return None
+    return _TOPIC_SEP.join(parts[:-1])
+
+
+def _topic_matches_parent(
+    anchor_topic: str, cand_topic: Optional[str], parent: str
+) -> bool:
+    if not cand_topic or not isinstance(cand_topic, str):
+        return False
+    if cand_topic == parent:
+        return True
+    return cand_topic.startswith(parent + _TOPIC_SEP)
+
+
+def _same_difficulty(a: Any, b: Any) -> bool:
+    try:
+        return round(float(a), 6) == round(float(b), 6)
+    except (TypeError, ValueError):
+        return False
+
+
+def _difficulty_neighbor_ok(anchor_d: Any, cand_d: Any) -> bool:
+    try:
+        a = float(anchor_d)
+    except (TypeError, ValueError):
+        return False
+    return _same_difficulty(cand_d, a - 1.0) or _same_difficulty(cand_d, a + 1.0)
+
+
+def _row_dataset_meta(row: Dict[str, Any]) -> Tuple[Optional[str], Any]:
+    ei = row.get("extra_info") or {}
+    t = ei.get("topic")
+    d = ei.get("difficulty")
+    topic_s: Optional[str] = None
+    if isinstance(t, str):
+        topic_s = t.strip() or None
+    return topic_s, d
+
+
+def _expand_random_q_pool_deepmath(
+    scored: List[Tuple[float, int]],
+    merged: List[Dict[str, Any]],
+    pos: int,
+) -> List[int]:
+    """
+    按 DeepMath extra_info：先同难度+同 topic，再父 topic+同难度，再 topic 规则不变且难度 ±1，
+    最后按相似度顺序补全至全表候选。
+    """
+    anchor_topic, anchor_d = _row_dataset_meta(merged[pos])
+    if anchor_topic is None or anchor_d is None:
+        return [j for _, j in scored]
+
+    in_pool: Set[int] = set()
+    pool_order: List[int] = []
+    parent = _topic_parent(anchor_topic)
+
+    def _add_tier(filter_fn) -> None:
+        for _sim, j in scored:
+            if j in in_pool:
+                continue
+            ct, cd = _row_dataset_meta(merged[j])
+            if filter_fn(ct, cd):
+                in_pool.add(j)
+                pool_order.append(j)
+
+    _add_tier(
+        lambda ct, cd: ct == anchor_topic and _same_difficulty(cd, anchor_d)
+    )
+    if parent is not None:
+        _add_tier(
+            lambda ct, cd: _same_difficulty(cd, anchor_d)
+            and _topic_matches_parent(anchor_topic, ct, parent)
+        )
+
+    def _topic_ok_c(ct: Optional[str]) -> bool:
+        if parent is not None:
+            return _topic_matches_parent(anchor_topic, ct, parent)
+        return ct == anchor_topic
+
+    _add_tier(lambda ct, cd: _topic_ok_c(ct) and _difficulty_neighbor_ok(anchor_d, cd))
+
+    for _sim, j in scored:
+        if j not in in_pool:
+            in_pool.add(j)
+            pool_order.append(j)
+    return pool_order
+
+
+def _pick_from_similarity_pool(
+    pool_order: List[int],
+    sim_by_j: Dict[int, float],
+    merged: List[Dict[str, Any]],
+    k: int,
+    prefer_low_acc: bool,
+    sim_pool_factor: int,
+) -> List[int]:
+    """在已定池内按相似度与 acc 策略选 ``k`` 个 merged 下标。"""
+    if k <= 0 or not pool_order:
+        return []
+    pool_sorted = sorted(pool_order, key=lambda j: -sim_by_j.get(j, 0.0))
+    k = min(k, len(pool_sorted))
+    if not prefer_low_acc:
+        return pool_sorted[:k]
+
+    spf = max(1, int(sim_pool_factor))
+    k_low = (k + 1) // 2
+    k_rand = k - k_low
+    m_take = min(len(pool_sorted), k * spf)
+    shortlist_js = pool_sorted[:m_take]
+
+    picked: Set[int] = set()
+    low_out: List[int] = []
+
+    def _low_acc_fill(need: int) -> None:
+        nonlocal low_out
+        cands = [(sim_by_j[j], j) for j in shortlist_js if j not in picked]
+        cands.sort(key=lambda sj: (_row_rollout_acc(merged[sj[1]]), -sj[0]))
+        for _s, j in cands:
+            if len(low_out) >= need:
+                break
+            if j not in picked:
+                low_out.append(j)
+                picked.add(j)
+        if len(low_out) < need:
+            extra = [
+                (sim_by_j[j], j)
+                for j in pool_sorted
+                if j not in picked
+            ]
+            extra.sort(
+                key=lambda sj: (_row_rollout_acc(merged[sj[1]]), -sj[0])
+            )
+            for _s, j in extra:
+                if len(low_out) >= need:
+                    break
+                low_out.append(j)
+                picked.add(j)
+
+    _low_acc_fill(k_low)
+    rand_pool = [j for j in pool_sorted if j not in picked]
+    n_rand = min(k_rand, len(rand_pool))
+    rand_out = random.sample(rand_pool, n_rand) if n_rand > 0 else []
+    return low_out + rand_out
+
+
 def _topk_by_embedding(
     pos: int,
     merged: List[Dict[str, Any]],
     k: int,
     doc_emb: np.ndarray,
     query_emb: np.ndarray,
+    interval_len: Optional[int] = None,
+    prefer_low_acc: bool = True,
+    sim_pool_factor: int = 10,
 ) -> List[int]:
     """
     在本 round merged 列表中（排除 ``pos`` 自身），用 ``merged[pos]["idx"]`` 对应的
-    ``query_emb`` 向量与其余每个 ``merged[j]["idx"]`` 对应的 ``doc_emb`` 向量计算余弦
-    相似度，返回相似度最高的前 ``k`` 个 merged 下标（有序）。
-    idx 越界或 norm 为零时跳过对应候选。
+    ``query_emb`` 与其余 ``doc_emb`` 算余弦相似度。
+
+    若 ``merged`` 已含 ``extra_info.topic`` / ``difficulty``（见 ``enrich_merged_rows_from_dataset``），
+    则候选池按 DeepMath 规则扩展：同难度+同 topic → 同难度+父 topic → 难度 ±1 + topic 规则，
+    再并入全表（仍受 interval 限制）按相似度排序。
+
+    ``prefer_low_acc`` 时：至少 ``ceil(k/2)`` 条在短名单内按 acc 升序、相似度降序选取；
+    其余在池内均匀随机。``prefer_low_acc=False`` 时池内按相似度 top-``k``。
+
+    ``interval_len`` 若为正，则只考虑与 ``pos`` 同属一个 training 区间的候选。
     """
     if k <= 0:
         return []
@@ -493,6 +745,12 @@ def _topk_by_embedding(
         return []
     if ci < 0 or ci >= n_emb or ci >= query_emb.shape[0]:
         return []
+    lo: Optional[int] = None
+    hi: Optional[int] = None
+    if interval_len is not None and int(interval_len) > 0:
+        il = int(interval_len)
+        lo = (ci // il) * il
+        hi = lo + il
     q_vec = query_emb[ci].astype(np.float64)
     qn = float(np.linalg.norm(q_vec))
     if qn < 1e-12:
@@ -509,6 +767,8 @@ def _topk_by_embedding(
             continue
         if cj < 0 or cj >= n_emb:
             continue
+        if lo is not None and hi is not None and not (lo <= cj < hi):
+            continue
         d_vec = doc_emb[cj].astype(np.float64)
         dn = float(np.linalg.norm(d_vec))
         if dn < 1e-12:
@@ -516,7 +776,19 @@ def _topk_by_embedding(
         scored.append((float(np.dot(d_vec / dn, q_unit)), j))
 
     scored.sort(key=lambda x: -x[0])
-    return [j for _, j in scored[:k]]
+    if not scored:
+        return []
+
+    sim_by_j = {j: s for s, j in scored}
+    pool_order = _expand_random_q_pool_deepmath(scored, merged, pos)
+    return _pick_from_similarity_pool(
+        pool_order,
+        sim_by_j,
+        merged,
+        k,
+        prefer_low_acc=prefer_low_acc,
+        sim_pool_factor=sim_pool_factor,
+    )
 
 
 def build_merged_rollout_records(
@@ -524,21 +796,36 @@ def build_merged_rollout_records(
     num_random: int,
     skill_type: str,
     embedding_cache_path: Optional[str] = None,
+    training_step: Optional[int] = None,
+    batch_size_for_interval: Optional[int] = None,
+    prefer_low_acc: bool = True,
+    sim_pool_factor: int = 10,
 ) -> None:
     """
     对 ``merge_shard_jsons`` 的结果原地整理为最终 merged 格式：
 
+    - 调用方应在 merge 之后对本列表执行 ``enrich_merged_rows_from_dataset(merged, records)``
+      （``run`` 已做），以便 ``extra_info.topic`` / ``difficulty`` 与数据集 ``idx`` 对齐。
     - ``num_random_questions > 0`` 且本 round 至少 2 条：从合并列表中随机抽其它样本，
       写入 ``random_questions`` / ``random_q_indices`` / ``reward_model.raw_random_q_acc`` /
-      ``extra_info.random_q_info``（与原先 rollout 导出一致）。
-    - 若提供 ``embedding_cache_path``（目录，含 ``*.meta.json`` + ``*.npz``），则用
-      ``merged[pos]["idx"]`` 在 doc/query 向量矩阵中取余弦相似度最高的 ``num_random``
-      个本 round 样本，替代随机采样；字段格式与随机模式完全一致。
+      ``extra_info.random_q_info``（与原先 rollout 导出一致，但不含 ``responses`` 以减小体积）。
+    - 若提供 ``embedding_cache_path``：在 ``merged`` 已含 topic/difficulty 时按 DeepMath 规则
+      扩候选池（同难度+同 topic → 父 topic+同难度 → 难度 ±1 + 同 topic 规则 → 全表），
+      再在池内按余弦相似度；``prefer_low_acc`` 时至少 ``ceil(K/2)`` 条在短名单（``sim_pool_factor``）
+      内按低 ``acc`` 优先选取，其余在池内均匀随机。缺 topic/difficulty 时退化为区间内的全局相似度池。
+    - 无 embedding 时随机对照：``prefer_low_acc`` 为真则至少一半 ``(1-acc)`` 加权、其余均匀随机。
     - ``reward_model``：``raw_q_acc``、``raw_random_q_acc``（列表，无对照时为 ``[]``）、
       ``style``、``skill_type``（与历史 merged 一致）。
-    - 每条写顶层 skill ``prompt``（get_skill_prompt）。
+    - 每条写顶层 skill ``prompt``（get_skill_prompt）；并在 ``extra_info.skill_traj_prompt_group`` 写入
+      ``success_only`` / ``mixed_sf`` / ``unclassified``（由 ``raw_q_info.is_right`` 判定，与模板中
+      ``[SUCCESS]``/``[FAIL]`` 一致）。全错行在收尾时从 ``merged`` 中移除。
+    - ``cmd_run`` 多波凑数时：仅在最终有效列表上调用本函数一次，故此处不再重复过滤入参。
+
+    若同时传入正整数 ``training_step`` 与 ``batch_size_for_interval``，则 random / embedding
+    对照题仅从 **同一 training 区间** 内选取；区间长度 ``= training_step * batch_size_for_interval``
+   （例如每区间 5 个 batch、每 batch 128 条 → 640 条样本共享候选池）。不传则候选为全表。
     """
-    from skill_src.utils import get_skill_prompt
+    from skill_src.utils import get_skill_prompt, skill_traj_prompt_group_from_is_right
 
     n = len(merged)
     path_s = (embedding_cache_path or "").strip()
@@ -547,6 +834,13 @@ def build_merged_rollout_records(
     query_emb: Optional[np.ndarray] = None
     if use_emb_cache:
         doc_emb, query_emb = _load_embedding_cache_from_dir(path_s)
+
+    interval_len: Optional[int] = None
+    if training_step is not None and batch_size_for_interval is not None:
+        ts = int(training_step)
+        bs_i = int(batch_size_for_interval)
+        if ts > 0 and bs_i > 0:
+            interval_len = ts * bs_i
 
     k = 0 if use_emb_cache else (min(num_random, n - 1) if num_random > 0 and n > 1 else 0)
 
@@ -557,7 +851,16 @@ def build_merged_rollout_records(
         ei = row["extra_info"]
         if use_emb_cache and doc_emb is not None and query_emb is not None and num_random > 0:
             k_eff = min(num_random, n - 1) if n > 1 else 0
-            pick = _topk_by_embedding(pos, merged, k_eff, doc_emb, query_emb)
+            pick = _topk_by_embedding(
+                pos,
+                merged,
+                k_eff,
+                doc_emb,
+                query_emb,
+                interval_len=interval_len,
+                prefer_low_acc=prefer_low_acc,
+                sim_pool_factor=sim_pool_factor,
+            )
             if pick:
                 for j in pick:
                     _ensure_rollout_row_normalized(merged[j])
@@ -569,7 +872,6 @@ def build_merged_rollout_records(
                 rqi: Dict[str, Any] = {
                     "indices": dataset_idxs,
                     "questions": [merged[j]["question"] for j in pick],
-                    "responses": [],
                     "answers": [],
                     "gt": [],
                     "is_right": [],
@@ -577,15 +879,41 @@ def build_merged_rollout_records(
                 }
                 for j in pick:
                     rq = merged[j]["extra_info"]["raw_q_info"]
-                    rqi["responses"].append(rq["responses"])
                     rqi["answers"].append(rq["answers"])
                     rqi["gt"].append(rq["gt"])
                     rqi["is_right"].append(rq["is_right"])
                     rqi["acc"].append(rq["acc"])
                 ei["random_q_info"] = rqi
         elif k > 0:
-            pool = [j for j in range(n) if j != pos]
-            pick = random.sample(pool, k)
+            if interval_len is not None:
+                try:
+                    ci = int(merged[pos]["idx"])
+                except (KeyError, TypeError, ValueError):
+                    ci = -1
+                if ci < 0:
+                    pool = []
+                else:
+                    lo = (ci // interval_len) * interval_len
+                    hi = lo + interval_len
+                    pool = []
+                    for j in range(n):
+                        if j == pos:
+                            continue
+                        try:
+                            cj = int(merged[j]["idx"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if lo <= cj < hi:
+                            pool.append(j)
+            else:
+                pool = [j for j in range(n) if j != pos]
+            if pool:
+                k_take = min(k, len(pool))
+                pick = _weighted_sample_pool_indices(
+                    pool, k_take, merged, prefer_low_acc
+                )
+            else:
+                pick = []
             for j in pick:
                 _ensure_rollout_row_normalized(merged[j])
 
@@ -596,7 +924,6 @@ def build_merged_rollout_records(
             rqi = {
                 "indices": dataset_idxs,
                 "questions": [merged[j]["question"] for j in pick],
-                "responses": [],
                 "answers": [],
                 "gt": [],
                 "is_right": [],
@@ -604,22 +931,42 @@ def build_merged_rollout_records(
             }
             for j in pick:
                 rq = merged[j]["extra_info"]["raw_q_info"]
-                rqi["responses"].append(rq["responses"])
                 rqi["answers"].append(rq["answers"])
                 rqi["gt"].append(rq["gt"])
                 rqi["is_right"].append(rq["is_right"])
                 rqi["acc"].append(rq["acc"])
             ei["random_q_info"] = rqi
 
-        rq = ei["raw_q_info"]
-        row["prompt"] = [
-            {
-                "role": "user",
-                "content": get_skill_prompt(
-                    row["raw_question"], rq["responses"], rq["is_right"], skill_type
-                ),
+        # num_random=0 或未命中 embedding 对照时不会进入上面分支，须与带对照的 merged 结构一致，
+        # 否则 SynthesizerDataset / SynthsizerRewardManager 读 cache 或 jsonl 会缺 random_q_info。
+        if "random_q_info" not in ei:
+            ei["random_q_info"] = {
+                "indices": [],
+                "questions": [],
+                "answers": [],
+                "gt": [],
+                "is_right": [],
+                "acc": [],
             }
-        ]
+
+        rq = ei["raw_q_info"]
+        ei["skill_traj_prompt_group"] = skill_traj_prompt_group_from_is_right(
+            rq.get("is_right")
+        )
+        if any(rq["is_right"]):
+            row["prompt"] = [
+                {
+                    "role": "user",
+                    "content": get_skill_prompt(
+                        row["raw_question"],
+                        rq["responses"],
+                        rq["is_right"],
+                        skill_type,
+                    ),
+                }
+            ]
+        else:
+            row["prompt"] = [{"role": "user", "content": ""}]
         rm = row.setdefault("reward_model", {})
         rm["raw_q_acc"] = rq["acc"]
         rm["raw_random_q_acc"] = (
@@ -628,6 +975,11 @@ def build_merged_rollout_records(
         rm.setdefault("style", "rule")
         rm.setdefault("skill_type", skill_type)
 
+    merged[:] = [
+        r
+        for r in merged
+        if any(r["extra_info"]["raw_q_info"]["is_right"])
+    ]
 
 
 def save_train_artifacts(
@@ -664,10 +1016,13 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise ValueError("data_files 中没有样本")
 
     need = args.steps * args.batch_size
-    print(f"[driver] need={need} samples")
+    print(f"[driver] need={need} samples (有效条数目标，全错过滤后可能多波 rollout 补足)")
+    if total_n == 0:
+        raise ValueError("data_files 中没有样本")
     if total_n < need:
-        raise ValueError(
-            f"需要 len(data) >= steps*batch_size，当前 total_n={total_n}, need={need}"
+        print(
+            f"[driver] WARN: total_n={total_n} < need={need}，将按剩余样本多波 rollout，"
+            "输出条数可能仍不足 need"
         )
     emb_cache_opt = (getattr(args, "embedding_cache_path", "") or "").strip()
     if (
@@ -691,50 +1046,27 @@ def cmd_run(args: argparse.Namespace) -> None:
         reset=args.reset_state,
     )
 
-    indices, new_cursor = allocate_this_round(
-        state.cursor, args.steps, args.batch_size, total_n
-    )
-    this_round = [records[i] for i in indices]
-
+    initial_cursor = state.cursor
     num_random = args.num_random_questions
     server_urls = resolve_rollout_server_urls(args.server_urls)
     n_servers = len(server_urls)
     if n_servers == 0:
         raise ValueError("请提供 --server-urls 或配置 SE_ROLLOUT_SERVER_URLS / SE_ROLLOUT_N_SERVERS")
 
+    mult = float(args.rollout_multiplier)
+    effective_rollout_n = max(1, int(round(args.rollout_n * mult)))
     print(
-        f"[driver] rollout servers: n={n_servers} urls={server_urls!r} "
-        f"(本 round 样本数 {len(this_round)}，将拆成至多 {n_servers} 个分片)"
+        f"[driver] rollout_n={args.rollout_n} × multiplier={mult} "
+        f"-> effective_rollout_n={effective_rollout_n}"
     )
 
-    sizes = split_sizes(len(this_round), n_servers)
+    valid_accum: List[Dict[str, Any]] = []
+    cursor_pos = state.cursor
+    rolled_total = 0
+    wave_id = 0
 
-    # 分片任务：默认内存列表 + 网络；可选写 shard jsonl（--shard-via-disk）
-    shard_tasks: List[Dict[str, Any]] = []
-    offset = 0
-    for shard_id, sz in enumerate(sizes):
-        if sz == 0:
-            continue
-        chunk = this_round[offset : offset + sz]
-        global_base = indices[offset]
-        offset += sz
-        task: Dict[str, Any] = {
-            "shard_id": shard_id,
-            "size": sz,
-            "global_base": global_base,
-            "records": chunk,
-            "server_url": server_urls[shard_id % n_servers],
-            "suffix": f"r{state.cursor}_{new_cursor}_s{shard_id}",
-        }
-        if args.shard_via_disk:
-            shard_path = os.path.join(work_dir, f"round_shard_{shard_id}.jsonl")
-            write_jsonl(shard_path, chunk)
-            task["data_file"] = shard_path
-        shard_tasks.append(task)
-
-    # server 只做本分片推理；merge 后 build_merged_rollout_records 做跨 shard random 与 skill prompt
     common_body = {
-        "rollout_n": args.rollout_n,
+        "rollout_n": effective_rollout_n,
         "max_tokens": args.max_tokens,
         "top_k": args.top_k,
         "top_p": args.top_p,
@@ -777,27 +1109,93 @@ def cmd_run(args: argparse.Namespace) -> None:
             if not isinstance(data, list):
                 raise RuntimeError(f"server 应返回 results 列表: {r}")
         if not isinstance(data, list):
-            raise RuntimeError(f"rollout 输出应为 list")
+            raise RuntimeError("rollout 输出应为 list")
         return task["global_base"], task["shard_id"], data
 
-    shard_outputs: List[Tuple[int, List[Dict[str, Any]]]] = []
-    print(f"[driver] shard_tasks={len(shard_tasks)}")
-    print('start rollout')
-    with ThreadPoolExecutor(max_workers=max(1, len(shard_tasks))) as ex:
-        futs = [ex.submit(_one, t) for t in shard_tasks]
-        for fut in as_completed(futs):
-            global_base, shard_id, data = fut.result()
-            print(f"[driver] shard {shard_id} 完成, global_base={global_base}, n={len(data)}")
-            shard_outputs.append((global_base, data))
+    while len(valid_accum) < need and cursor_pos < total_n:
+        wave_n = min(need - len(valid_accum), total_n - cursor_pos)
+        if wave_n <= 0:
+            break
+        indices = list(range(cursor_pos, cursor_pos + wave_n))
+        this_round = [records[i] for i in indices]
+        print(
+            f"[driver] rollout wave {wave_id}: wave_n={wave_n} "
+            f"idx=[{indices[0]}, {indices[-1]}] 有效累计 {len(valid_accum)}/{need}；"
+            f"servers={n_servers} urls={server_urls!r}"
+        )
 
-    merged = merge_shard_jsons(shard_outputs)
+        sizes = split_sizes(len(this_round), n_servers)
+        shard_tasks: List[Dict[str, Any]] = []
+        offset = 0
+        for shard_id, sz in enumerate(sizes):
+            if sz == 0:
+                continue
+            chunk = this_round[offset : offset + sz]
+            global_base = indices[offset]
+            offset += sz
+            task: Dict[str, Any] = {
+                "shard_id": shard_id,
+                "size": sz,
+                "global_base": global_base,
+                "records": chunk,
+                "server_url": server_urls[shard_id % n_servers],
+                "suffix": f"r{initial_cursor}_w{wave_id}_s{shard_id}",
+            }
+            if args.shard_via_disk:
+                shard_path = os.path.join(
+                    work_dir, f"round_w{wave_id}_shard_{shard_id}.jsonl"
+                )
+                write_jsonl(shard_path, chunk)
+                task["data_file"] = shard_path
+            shard_tasks.append(task)
+
+        shard_outputs: List[Tuple[int, List[Dict[str, Any]]]] = []
+        print(f"[driver] wave {wave_id} shard_tasks={len(shard_tasks)} start rollout")
+        _pool = max(
+            1, min(int(args.rollout_max_workers), len(shard_tasks))
+        )
+        with ThreadPoolExecutor(max_workers=_pool) as ex:
+            futs = [ex.submit(_one, t) for t in shard_tasks]
+            for fut in as_completed(futs):
+                global_base, shard_id, data = fut.result()
+                print(
+                    f"[driver] wave {wave_id} shard {shard_id} 完成, "
+                    f"global_base={global_base}, n={len(data)}"
+                )
+                shard_outputs.append((global_base, data))
+
+        merged_wave = merge_shard_jsons(shard_outputs)
+        enrich_merged_rows_from_dataset(merged_wave, records)
+        for row in merged_wave:
+            _ensure_rollout_row_normalized(row)
+            if any(row["extra_info"]["raw_q_info"]["is_right"]):
+                valid_accum.append(row)
+
+        cursor_pos += wave_n
+        rolled_total += wave_n
+        print(
+            f"[driver] wave {wave_id} 结束: 有效样本 {len(valid_accum)}/{need}, "
+            f"cursor_pos={cursor_pos}"
+        )
+        wave_id += 1
+
+    merged = valid_accum[:need]
+    if len(merged) < need:
+        print(
+            f"[driver] WARNING: 全错过滤或多波用尽后仅得到 {len(merged)}/{need} 条有效样本"
+        )
+
+    final_cursor = initial_cursor + rolled_total
+
     build_merged_rollout_records(
         merged,
         num_random,
         args.skill_type,
         embedding_cache_path=emb_cache_opt or None,
+        prefer_low_acc=bool(args.random_q_prefer_low_acc),
+        sim_pool_factor=int(args.random_q_sim_pool_factor),
     )
-    merge_json = os.path.join(work_dir, f"merged_r{state.cursor}_{new_cursor}.json")
+    merge_json = os.path.join(work_dir, f"merged_r{initial_cursor}_{final_cursor}.json")
     with open(merge_json, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2, ensure_ascii=False)
 
@@ -808,12 +1206,13 @@ def cmd_run(args: argparse.Namespace) -> None:
             prefix=args.merge_prefix,
         )
 
-    state.cursor = new_cursor
+    state.cursor = final_cursor
     save_state(state_path_resolved, state)
     remaining = total_n - state.cursor
     print(
-        f"[driver] 本轮使用下标 [{indices[0]}, {indices[-1]}], 已写入合并文件: {merge_json}\n"
-        f"         cursor {state.cursor - need} -> {state.cursor}, 剩余未消费样本: {remaining}"
+        f"[driver] 本轮共 rollout 原始样本 {rolled_total} 条，输出有效 {len(merged)} 条；"
+        f"合并文件: {merge_json}\n"
+        f"         cursor {initial_cursor} -> {final_cursor}, 剩余未消费样本: {remaining}"
     )
 
     if args.shutdown_servers_after_run != "none":
@@ -847,6 +1246,33 @@ def cmd_status(args: argparse.Namespace) -> None:
             ensure_ascii=False,
         )
     )
+
+
+def _env_bool_default(env_name: str, default: bool) -> bool:
+    v = (os.environ.get(env_name) or "").strip().lower()
+    if not v:
+        return default
+    return v not in ("0", "false", "no", "off")
+
+
+def _env_int_min1(env_name: str, default: int) -> int:
+    v = (os.environ.get(env_name) or "").strip()
+    if not v:
+        return max(1, default)
+    try:
+        return max(1, int(v))
+    except ValueError:
+        return max(1, default)
+
+
+def _env_rollout_multiplier_default(env_name: str, default: float) -> float:
+    v = (os.environ.get(env_name) or "").strip()
+    if not v:
+        return max(1.0, default)
+    try:
+        return max(1.0, float(v))
+    except ValueError:
+        return max(1.0, default)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -889,6 +1315,24 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--merge-prefix", type=str, default="train_data")
     run.add_argument("--skill-type", type=str, default="skill_generation_v1")
     run.add_argument("--rollout-n", type=int, default=10)
+    run.add_argument(
+        "--rollout-multiplier",
+        type=float,
+        default=_env_rollout_multiplier_default("SE_ROLLOUT_MULTIPLIER", 2.0),
+        help=(
+            "发给 server 的 rollout 次数 = max(1, round(rollout_n * multiplier))；"
+            "默认 2，环境变量 SE_ROLLOUT_MULTIPLIER"
+        ),
+    )
+    run.add_argument(
+        "--rollout-max-workers",
+        type=int,
+        default=_env_int_min1("SE_OFFLINE_DRIVER_ROLLOUT_MAX_WORKERS", 512),
+        help=(
+            "每波分片 rollout 的线程池容量上限（实际并发 = min(本值, 分片任务数)，用于 I/O 并发；"
+            "非多进程）。环境变量 SE_OFFLINE_DRIVER_ROLLOUT_MAX_WORKERS"
+        ),
+    )
     run.add_argument("--max-tokens", type=int, default=4096)
     run.add_argument("--top-k", type=int, default=50)
     run.add_argument("--top-p", type=float, default=0.95)
@@ -902,6 +1346,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "可选：embedding cache 目录（含 *.meta.json + *.npz）；"
             "用 merged[i][\"idx\"] 查 doc/query 向量，按余弦相似度 top-num_random 替代本 round 随机采样"
+        ),
+    )
+    run.add_argument(
+        "--random-q-prefer-low-acc",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool_default("SE_RANDOM_Q_PREFER_LOW_ACC", True),
+        help=(
+            "对照题：至少 ceil(K/2) 条偏好低 acc（embedding：DeepMath 池内短名单按 acc；"
+            "无 embedding：(1-acc) 加权），其余在候选池内均匀随机。可由 SE_RANDOM_Q_PREFER_LOW_ACC=0 关闭"
+        ),
+    )
+    run.add_argument(
+        "--random-q-sim-pool-factor",
+        type=int,
+        default=_env_int_min1("SE_RANDOM_Q_SIM_POOL_FACTOR", 10),
+        help=(
+            "embedding：低 acc 侧主要从相似度 top-(K×因子) 短名单挑选（池为 DeepMath topic/difficulty 扩池后）。"
+            "环境变量 SE_RANDOM_Q_SIM_POOL_FACTOR"
         ),
     )
     run.add_argument("--request-timeout", type=float, default=86400.0)

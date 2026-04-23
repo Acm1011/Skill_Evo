@@ -108,10 +108,11 @@ def _resolve_records(job: RolloutJob) -> List[Dict[str, Any]]:
 def create_app(
     vllm_server_urls: List[str],
     model_path: str,
-    timeout: float = 300.0,
+    timeout: float = 3600.0,
     max_retries: int = 3,
     retry_delay: float = 1.0,
     served_model_name: Optional[str] = None,
+    max_concurrent: int = 32,
 ) -> FastAPI:
     """
     创建 FastAPI 应用。
@@ -123,6 +124,7 @@ def create_app(
         max_retries: 重试次数
         retry_delay: 重试间隔（秒）
         served_model_name: 传给 vLLM OpenAI API 的 model 名；None 时由 VLLMHTTPClient 从环境变量解析
+        max_concurrent: 同时对 vLLM 的 completions 并发上限；0 为不限制（易触发 ReadTimeout）
     """
     _configure_logging()
     app = FastAPI(title="solver_offline_rollout_http_client", version="1.0")
@@ -150,8 +152,14 @@ def create_app(
                 max_retries=max_retries,
                 retry_delay=retry_delay,
                 served_model_name=served_model_name,
+                max_concurrent=max_concurrent,
             )
-            logger.info(f"VLLMHTTPClient 初始化完成，连接到 {len(vllm_server_urls)} 个 server")
+            logger.info(
+                "VLLMHTTPClient 初始化完成: servers=%d timeout=%.1fs max_concurrent=%d",
+                len(vllm_server_urls),
+                timeout,
+                max_concurrent,
+            )
 
             _state["tokenizer"] = tokenizer
             _state["qwen3_post_trained"] = qwen3
@@ -303,6 +311,7 @@ def _app_from_env() -> FastAPI:
     timeout = float(os.environ.get("VLLM_HTTP_TIMEOUT", "300.0"))
     max_retries = int(os.environ.get("VLLM_HTTP_MAX_RETRIES", "3"))
     retry_delay = float(os.environ.get("VLLM_HTTP_RETRY_DELAY", "1.0"))
+    max_concurrent = int(os.environ.get("VLLM_HTTP_MAX_CONCURRENT", "32"))
     served = os.environ.get("VLLM_SERVED_MODEL_NAME", "").strip() or os.environ.get(
         "SERVED_MODEL_NAME", ""
     ).strip() or None
@@ -314,6 +323,7 @@ def _app_from_env() -> FastAPI:
         max_retries=max_retries,
         retry_delay=retry_delay,
         served_model_name=served,
+        max_concurrent=max_concurrent,
     )
 
 
@@ -331,10 +341,16 @@ def _stub_app() -> FastAPI:
     return stub
 
 
-try:
-    app = _app_from_env()
-except RuntimeError as e:
-    logger.warning(f"Failed to create app from env: {e}")
+# 供 ``uvicorn skill_src.solver_offline_rollout_http_client:app`` 等场景使用：需预先 export
+# VLLM_HTTP_SERVER_URLS / ROLLOUT_SERVER_MODEL。若用 ``python -m ... --vllm-urls ...`` 启动，导入本模块时
+# 环境变量尚未设置属正常，此时为 stub；真正对外服务的是 __main__ 里 ``create_app`` + ``uvicorn.run`` 的实例。
+if os.environ.get("VLLM_HTTP_SERVER_URLS", "").strip():
+    try:
+        app = _app_from_env()
+    except RuntimeError as e:
+        logger.warning("Failed to create app from env: %s", e)
+        app = _stub_app()
+else:
     app = _stub_app()
 
 
@@ -360,6 +376,12 @@ if __name__ == "__main__":
     p.add_argument("--host", type=str, default="0.0.0.0")
     p.add_argument("--port", type=int, default=8762)
     p.add_argument("--timeout", type=float, default=300.0)
+    p.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=0,
+        help="对 vLLM 的 completions 最大并发数；0 表示读环境变量 VLLM_HTTP_MAX_CONCURRENT（默认 32）",
+    )
     p.add_argument("--max-retries", type=int, default=3)
     p.add_argument(
         "--retry-delay",
@@ -380,6 +402,10 @@ if __name__ == "__main__":
     os.environ["VLLM_HTTP_SERVER_URLS"] = cli.vllm_urls
     os.environ["ROLLOUT_SERVER_MODEL"] = cli.model
     smn = (cli.served_model_name or "").strip() or None
+
+    max_concurrent = cli.max_concurrent
+    if max_concurrent <= 0:
+        max_concurrent = int(os.environ.get("VLLM_HTTP_MAX_CONCURRENT", "32"))
     
     app_main = create_app(
         server_urls,
@@ -388,5 +414,6 @@ if __name__ == "__main__":
         max_retries=cli.max_retries,
         retry_delay=cli.retry_delay,
         served_model_name=smn,
+        max_concurrent=max_concurrent,
     )
     uvicorn.run(app_main, host=cli.host, port=cli.port)
