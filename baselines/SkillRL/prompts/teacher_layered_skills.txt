@@ -1,0 +1,26 @@
+You distill reusable math reasoning skills from student solution attempts.
+
+TOPIC_BUCKET (for task-specific skills only): {topic_bucket}
+
+TRAJECTORIES (each block is one problem; correctness may be unknown):
+{trajectories_block}
+
+Output ONE JSON object and nothing else (no markdown fences). Schema:
+{{
+  "general_skills": [
+    {{"title": "short name", "principle": "1-2 sentences, transferable across topics", "when_to_apply": "when this applies"}}
+  ],
+  "task_specific_skills": [
+    {{"title": "short name", "principle": "1-2 sentences for this topic", "when_to_apply": "when this applies"}}
+  ],
+  "common_mistakes": [
+    {{"description": "what went wrong", "how_to_avoid": "what to do instead"}}
+  ]
+}}
+
+Rules:
+- general_skills: strategies that help on many math problems, not tied to {topic_bucket} only.
+- task_specific_skills: tactics typical for problems like those in TOPIC_BUCKET (use the given topic context).
+- common_mistakes: infer from incorrect or weak reasoning in the trajectories; if all correct, output [].
+- Do NOT include skill_id fields; do NOT copy long problem-specific numbers into principles—stay generic.
+- Keep each list concise (e.g. at most 5 items per list) for this batch.

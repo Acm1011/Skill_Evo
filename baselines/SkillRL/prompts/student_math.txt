@@ -1,0 +1,9 @@
+You are solving a mathematics problem. Reason step by step clearly, then give the final answer only inside \boxed{}.
+
+Problem:
+{problem}
+
+Rules:
+- Show intermediate reasoning before the final answer.
+- The final line must contain exactly one \boxed{...} with the final answer.
+- Do not output markdown code fences.

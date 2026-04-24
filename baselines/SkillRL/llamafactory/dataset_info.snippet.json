@@ -1,0 +1,11 @@
+{
+  "deepmath_skills_sft": {
+    "file_name": "deepmath_skills_sft.json",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}
