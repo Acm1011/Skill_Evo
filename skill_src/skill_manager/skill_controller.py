@@ -190,7 +190,15 @@ class SkillController:
         *,
         persist: bool = True,
     ) -> list[dict[str, Any]]:
-        """每行 JSON 含 ``id``、``is_success``、``reward``，按 `SkillManager` 的公式更新 utility。
+        """从 jsonl 按行读取并更新各 skill 的 utility（委托 ``SkillManager.update_utilities_from_rewards``）。
+
+        每行支持两种结构：
+
+        - **旧格式**：``id``、``is_success``、``reward``（缺一不可）。
+        - **Solver / reward_info 格式**（与 ``reward_manager`` 写入的条目对齐）：非空
+          ``skill_id`` 列表、``group_infos`` 内含非空 ``acc`` 列表；对 ``acc`` 取均值后按
+          ``s_t=2*(acc-0.5)`` 与 ``reward`` 参与更新。``reward`` 可省略，默认 ``1.0``。
+          行内列出的每个 ``skill_id`` 各计一次更新；多 id 时结果项中会有 ``sub`` 下标。
 
         若 ``persist`` 为 True，处理完后对 ``manager.persist_path`` 执行 ``save_jsonl``。
         """

@@ -69,7 +69,7 @@ train_prompt_mini_bsz=$((train_prompt_bsz / 2))
 # Paths
 # TODO: 训练数据准备， 测试数据准备
 TRAIN_FILE=${storage_path}/train_data.parquet
-TEST_FILE=${data_dir}/ttrl/test_set.parquet
+TEST_FILE=${storage_path}/test_data.parquet
 
 # Algorithm
 temperature=1.0

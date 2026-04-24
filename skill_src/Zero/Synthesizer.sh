@@ -8,10 +8,11 @@
 #   第 6 个参数可选：embedding cache 目录（含 *.meta.json + *.npz）；省略或与 SE_EMBEDDING_CACHE_PATH 均未设置时为空（随机采样）。
 #
 # 流程:
-#   Step 1. 用后半 GPU 启动 rollout server (start_rollout_servers.sh) + 健康检查
+#   Step 1. 全机 SE_GPU_IDS 上启动 rollout (start_rollout_servers.sh) + 健康检查（offline 用满所有卡）
 #   Step 2. solver_offline_driver 离线 rollout → merged parquet
-#   Step 3. 前半 GPU 做 Synthesizer RL 训练（rollout server 保持运行供 reward 评估）
-#   退出时自动清理 rollout server
+#   2.5 offline 结束后 pkill python，释放 vLLM 与 GPU
+#   Step 3. 仅后半卡再启 rollout（reward 评估）；前半卡做 Synthesizer RL 训练
+#   退出时自动清理 Step 3 的 rollout server
 #
 # 超参数环境变量（由 main.sh export）:
 #   Offline rollout: SE_OFFLINE_ROLLOUT_STEPS / SE_OFFLINE_ROLLOUT_BATCH_SIZE /
@@ -35,10 +36,9 @@ synthesizer_training_steps="$4"
 data_file="$5"
 # 可选第 7 参；仅当 $7 未设置时才回退 SE_EMBEDDING_CACHE_PATH；显式传空字符串则保持为空（不传 --embedding-cache-path）
 embedding_cache_path="${7-${SE_EMBEDDING_CACHE_PATH:-}}"
-echo "[exp_name]: ${exp_name}"
-echo "[version]: ${version}"
+echo "[version]: ${exp_version}"
 # ========================== 验证参数 ==========================
-for var_name in exp_name synthesizer_model_path solver_model_path synthesizer_training_steps data_file; do
+for var_name in exp_version synthesizer_model_path solver_model_path synthesizer_training_steps data_file; do
     if [ -z "${!var_name}" ]; then
         echo "Error: ${var_name} 不能为空"; exit 1
     fi
@@ -77,54 +77,44 @@ N_SYNTH_GPUS="${HALF}"
 N_ROLLOUT_SERVERS="${HALF}"
 ROLLOUT_BASE_PORT="${SE_ROLLOUT_BASE_PORT:-8760}"
 
-echo "[GPU配置] Synthesizer GPUs: ${SYNTH_GPU_IDS} (${N_SYNTH_GPUS} 张)"
-echo "[GPU配置] Rollout GPUs:     ${ROLLOUT_GPU_IDS} (${N_ROLLOUT_SERVERS} 张)"
-
-# ===========================================================================
-# Step 1: 启动 rollout server + 健康检查
-# ===========================================================================
-echo ""
-echo "========== Step 1: 启动 rollout server =========="
+echo "[GPU配置] 训练/ reward 阶段 — Synthesizer GPUs: ${SYNTH_GPU_IDS} (${N_SYNTH_GPUS} 张)"
+echo "[GPU配置] 训练/ reward 阶段 — Rollout GPUs:     ${ROLLOUT_GPU_IDS} (${N_ROLLOUT_SERVERS} 张)"
+echo "[GPU配置] Offline 阶段将使用全机: ${SE_GPU_IDS} (共 ${SE_N_GPUS} 张)"
 
 export SE_N_GPUS_SAVED="${SE_N_GPUS}"
 export SE_GPU_IDS_SAVED="${SE_GPU_IDS}"
-export SE_N_GPUS="${N_ROLLOUT_SERVERS}"
-export SE_GPU_IDS="${ROLLOUT_GPU_IDS}"
+
+# ===========================================================================
+# Step 1: 全卡启动 rollout（仅用于 offline）+ 健康检查
+# ===========================================================================
+echo ""
+echo "========== Step 1: 全卡 rollout（offline）=========="
+
+export SE_N_GPUS="${SE_N_GPUS_SAVED}"
+export SE_GPU_IDS="${SE_GPU_IDS_SAVED}"
+export SE_ROLLOUT_N_SERVERS="${SE_N_GPUS_SAVED}"
 export ROLLOUT_SERVER_MODEL="${solver_model_path}"
-export SE_ROLLOUT_N_SERVERS="${N_ROLLOUT_SERVERS}"
 export SE_ROLLOUT_BASE_PORT="${ROLLOUT_BASE_PORT}"
-# run_with_gpus.sh 按「整机 SE_N_GPUS」填了 SE_ROLLOUT_SERVER_URLS；此处只起了后半
-# N_ROLLOUT_SERVERS 个 server。若不取消，driver/reward 仍会连到未监听端口 → Connection refused。
 unset SE_ROLLOUT_SERVER_URLS
 unset SE_ROLLOUT_PORTS
 
-ROLLOUT_SERVER_PID=""
-cleanup_rollout() {
-    if [ -n "${ROLLOUT_SERVER_PID}" ]; then
-        echo "清理 rollout server (PID: ${ROLLOUT_SERVER_PID})..."
-        kill "${ROLLOUT_SERVER_PID}" 2>/dev/null || true
-        wait "${ROLLOUT_SERVER_PID}" 2>/dev/null || true
-    fi
-}
-trap cleanup_rollout EXIT
-
 bash "${SCRIPT_DIR}/start_rollout_servers.sh" --model "${solver_model_path}" &
-ROLLOUT_SERVER_PID=$!
-echo "Rollout server PID: ${ROLLOUT_SERVER_PID}"
+OFFLINE_ROLLOUT_PID=$!
+echo "[offline] start_rollout_servers 父 shell PID: ${OFFLINE_ROLLOUT_PID}"
 
 MAX_WAIT=300
-for ((i=0; i<N_ROLLOUT_SERVERS; i++)); do
+for ((i=0; i<SE_N_GPUS_SAVED; i++)); do
     port=$((ROLLOUT_BASE_PORT + i))
     waited=0
     while [ $waited -lt $MAX_WAIT ]; do
         if curl -sf "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
-            echo "  server ${i} (port ${port}) 就绪 (${waited}s)"
+            echo "  [offline] server ${i} (port ${port}) 就绪 (${waited}s)"
             break
         fi
         sleep 5; waited=$((waited + 5))
     done
     if [ $waited -ge $MAX_WAIT ]; then
-        echo "Error: rollout server ${i} (port ${port}) 启动超时"; exit 1
+        echo "Error: [offline] rollout server ${i} (port ${port}) 启动超时"; exit 1
     fi
 done
 
@@ -142,6 +132,8 @@ echo "  data_file: ${data_file}"
 echo "  steps=${SE_OFFLINE_ROLLOUT_STEPS}  batch=${SE_OFFLINE_ROLLOUT_BATCH_SIZE}  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
 
 cd "${SE_WORKING_DIR}"
+# driver 用 SE_ROLLOUT_BASE_PORT + SE_ROLLOUT_N_SERVERS 解析各 server URL（须与 Step 1 全卡数一致）
+export SE_ROLLOUT_N_SERVERS="${SE_N_GPUS_SAVED}"
 offline_cmd=(
     python3 -m "${SE_CODE_MODULE}.solver_offline_driver" run
     --data-files "${data_file}"
@@ -163,19 +155,73 @@ fi
 
 echo "离线 rollout 完成"
 
+# ===========================================================================
+# offline 与全卡 vLLM 全部结束，避免占显存
+# ===========================================================================
+echo ""
+echo "========== 结束 offline: pkill python，释放全卡 rollout =========="
+pkill python 2> /dev/null || true
+if kill -0 "${OFFLINE_ROLLOUT_PID}" 2> /dev/null; then
+    echo "  结束 start_rollout_servers 父进程 (PID ${OFFLINE_ROLLOUT_PID})"
+    kill "${OFFLINE_ROLLOUT_PID}" 2> /dev/null || true
+    wait "${OFFLINE_ROLLOUT_PID}" 2> /dev/null || true
+fi
+sleep 3
+OFFLINE_ROLLOUT_PID=""
+
+# ===========================================================================
+# Step 3: 仅后半卡再启 rollout（供 reward）+ 健康检查
+# ===========================================================================
+echo ""
+echo "========== Step 3: 半卡启动 rollout（reward 评估用）=========="
+
+export SE_N_GPUS="${N_ROLLOUT_SERVERS}"
+export SE_GPU_IDS="${ROLLOUT_GPU_IDS}"
+export SE_ROLLOUT_N_SERVERS="${N_ROLLOUT_SERVERS}"
+export ROLLOUT_SERVER_MODEL="${solver_model_path}"
+export SE_ROLLOUT_BASE_PORT="${ROLLOUT_BASE_PORT}"
+unset SE_ROLLOUT_SERVER_URLS
+unset SE_ROLLOUT_PORTS
+
+ROLLOUT_SERVER_PID=""
+cleanup_rollout() {
+    if [ -n "${ROLLOUT_SERVER_PID}" ]; then
+        echo "清理 reward rollout (PID: ${ROLLOUT_SERVER_PID})..."
+        kill "${ROLLOUT_SERVER_PID}" 2> /dev/null || true
+        wait "${ROLLOUT_SERVER_PID}" 2> /dev/null || true
+    fi
+}
+trap cleanup_rollout EXIT
+
+bash "${SCRIPT_DIR}/start_rollout_servers.sh" --model "${solver_model_path}" &
+ROLLOUT_SERVER_PID=$!
+echo "  reward rollout 父 shell PID: ${ROLLOUT_SERVER_PID}"
+
+for ((i=0; i<N_ROLLOUT_SERVERS; i++)); do
+    port=$((ROLLOUT_BASE_PORT + i))
+    waited=0
+    while [ $waited -lt $MAX_WAIT ]; do
+        if curl -sf "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
+            echo "  [reward] server ${i} (port ${port}) 就绪 (${waited}s)"
+            break
+        fi
+        sleep 5; waited=$((waited + 5))
+    done
+    if [ $waited -ge $MAX_WAIT ]; then
+        echo "Error: [reward] rollout server ${i} (port ${port}) 启动超时"; exit 1
+    fi
+done
+
 TRAIN_DATA_FILE="${OFFLINE_MERGE_DIR}/train_data.parquet"
 [ -f "${TRAIN_DATA_FILE}" ] || TRAIN_DATA_FILE="${OFFLINE_MERGE_DIR}/train_data.jsonl"
 [ -f "${TRAIN_DATA_FILE}" ] || { echo "Error: 未找到训练数据"; exit 1; }
 echo "训练数据: ${TRAIN_DATA_FILE}"
 
 # ===========================================================================
-# Step 3: Synthesizer RL 训练
+# Step 4: Synthesizer RL 训练（前半卡；环境保持 Step 3 的半机 reward server 配置）
 # ===========================================================================
 echo ""
-echo "========== Step 3: Synthesizer RL 训练 =========="
-
-export SE_N_GPUS="${SE_N_GPUS_SAVED}"
-export SE_GPU_IDS="${SE_GPU_IDS_SAVED}"
+echo "========== Step 4: Synthesizer RL 训练 =========="
 
 # 从环境变量读取超参数（由 main.sh export）
 batch_size="${SYNTH_BATCH_SIZE}"

@@ -25,22 +25,41 @@ def parse_is_success(raw: Any) -> bool:
     raise TypeError(f"is_success must be bool or 0/1, got {type(raw).__name__}")
 
 
+def _mean_group_acc(entry: dict[str, Any]) -> float | None:
+    """从 ``group_infos['acc']`` 列表取标量；无效则返回 None。"""
+    gi = entry.get("group_infos")
+    if not isinstance(gi, dict):
+        return None
+    al = gi.get("acc")
+    if not isinstance(al, (list, tuple)) or len(al) == 0:
+        return None
+    try:
+        vals = [float(x) for x in al]
+    except (TypeError, ValueError):
+        return None
+    return sum(vals) / len(vals)
+
+
 def compute_next_utility(
     utility: float,
     R: float,
-    is_success: bool | int,
+    acc: float,
     *,
     alpha: float,
     tau: float,
     u_min: float,
     u_max: float,
+    acc_mid: float = 0.5,
 ) -> tuple[float, bool]:
-    """U_{t+1} = clip(U_t + α * s_t * max(0, R - τ), U_min, U_max)；s_t ∈ {+1,-1}。
+    """U_{t+1} = clip(U_t + α * s_t * max(0, R - τ), U_min, U_max)。
+
+    其中 s_t = 2 * (acc - acc_mid)，在 [0,1] 上 acc=acc_mid 时 s_t=0；
+    纯 0/1 时与旧二值 s_t=±1 一致。
 
     Returns:
         (new_utility, changed) — max(0, R-τ)==0 时增量为 0，changed 为 False。
     """
-    st = 1.0 if parse_is_success(is_success) else -1.0
+    st = 2.0 * (float(acc) - float(acc_mid))
     delta = max(0.0, float(R) - float(tau))
     if delta == 0.0:
         return float(utility), False
@@ -210,55 +229,126 @@ class SkillManager:
         self,
         updates: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """每项需含 id、is_success、reward（R_t）。使用 compute_next_utility + update_with_zone_logic。"""
+        """按 reward 行更新 utility。
+
+        - **旧行**：``id``、``is_success``、``reward``（R_t）。将 ``is_success`` 映射为 acc∈{0,1} 后代入公式。
+        - **Solver / group 行**（与 ``reward_manager`` 的 ``reward_info`` 对齐）：非空
+          ``skill_id`` 列表、``group_infos['acc']`` 为非空列表；对 acc 做均值得到 acc_bar，并对列表中
+          每个 id 各更新一次。``reward`` 可省略，默认 ``1.0``。
+        """
         results: list[dict[str, Any]] = []
         for idx, entry in enumerate(updates):
-            skill_id = entry.get("id")
-            if not isinstance(skill_id, str) or not skill_id:
-                results.append({"index": idx, "ok": False, "error": "missing or empty 'id'"})
-                continue
-            raw_ok = entry.get("is_success")
-            if raw_ok is None:
-                results.append({"index": idx, "id": skill_id, "ok": False, "error": "missing 'is_success'"})
-                continue
-            try:
-                is_ok = parse_is_success(raw_ok)
-            except TypeError as e:
-                results.append({"index": idx, "id": skill_id, "ok": False, "error": str(e)})
-                continue
-            reward_raw = entry.get("reward")
-            if reward_raw is None:
-                results.append({"index": idx, "id": skill_id, "ok": False, "error": "missing 'reward'"})
-                continue
-            try:
-                reward = float(reward_raw)
-            except (TypeError, ValueError):
-                results.append({"index": idx, "id": skill_id, "ok": False, "error": "'reward' must be a number"})
+            if not isinstance(entry, dict):
+                results.append({"index": idx, "ok": False, "error": "entry must be a dict"})
                 continue
 
-            item, zone = self.get_by_id_any(skill_id)
-            if item is None:
-                results.append({"index": idx, "id": skill_id, "ok": False, "error": "skill not found"})
+            raw_sids = entry.get("skill_id")
+            is_group = isinstance(raw_sids, (list, tuple)) and "skill_id" in entry
+            if is_group and len(raw_sids) == 0:
+                results.append({"index": idx, "ok": False, "error": "empty 'skill_id' list"})
                 continue
+            if is_group:
+                skill_ids: list[str] = []
+                for s in raw_sids:
+                    t = str(s).strip() if s is not None else ""
+                    if t:
+                        skill_ids.append(t)
+                if not skill_ids:
+                    results.append({"index": idx, "ok": False, "error": "no valid id in 'skill_id'"})
+                    continue
+                acc_bar = _mean_group_acc(entry)
+                if acc_bar is None:
+                    results.append(
+                        {
+                            "index": idx,
+                            "ok": False,
+                            "error": "missing or empty group_infos['acc'] for skill_id row",
+                        }
+                    )
+                    continue
+                acc_val = float(acc_bar)
+                rw = entry.get("reward", 1.0)
+                if rw is None:
+                    rw = 1.0
+                try:
+                    reward = float(rw)
+                except (TypeError, ValueError):
+                    results.append({"index": idx, "ok": False, "error": "'reward' must be a number"})
+                    continue
+            else:
+                skill_id = entry.get("id")
+                if not isinstance(skill_id, str) or not skill_id:
+                    results.append(
+                        {
+                            "index": idx,
+                            "ok": False,
+                            "error": "missing or empty 'id' (and not a skill_id list row)",
+                        }
+                    )
+                    continue
+                skill_ids = [skill_id]
+                raw_ok = entry.get("is_success")
+                if raw_ok is None:
+                    results.append({"index": idx, "id": skill_id, "ok": False, "error": "missing 'is_success'"})
+                    continue
+                try:
+                    is_ok = parse_is_success(raw_ok)
+                except TypeError as e:
+                    results.append({"index": idx, "id": skill_id, "ok": False, "error": str(e)})
+                    continue
+                acc_val = 1.0 if is_ok else 0.0
+                reward_raw = entry.get("reward")
+                if reward_raw is None:
+                    results.append({"index": idx, "id": skill_id, "ok": False, "error": "missing 'reward'"})
+                    continue
+                try:
+                    reward = float(reward_raw)
+                except (TypeError, ValueError):
+                    results.append(
+                        {"index": idx, "id": skill_id, "ok": False, "error": "'reward' must be a number"}
+                    )
+                    continue
 
-            new_utility, _ = compute_next_utility(
-                item.utility,
-                reward,
-                is_ok,
-                alpha=self._utility_alpha,
-                tau=self._utility_tau,
-                u_min=self._utility_u_min,
-                u_max=self._utility_u_max,
-            )
-            try:
-                zone_result = self.update_with_zone_logic(
-                    skill_id, is_ok, new_utility, old_utility=item.utility
+            n_skills = len(skill_ids)
+            for sub, skill_id in enumerate(skill_ids):
+                item, zone = self.get_by_id_any(skill_id)
+                if item is None:
+                    r: dict[str, Any] = {
+                        "index": idx,
+                        "id": skill_id,
+                        "ok": False,
+                        "error": "skill not found",
+                    }
+                    if n_skills > 1:
+                        r["sub"] = sub
+                    results.append(r)
+                    continue
+
+                is_count_success = acc_val >= 0.5
+                new_utility, _ = compute_next_utility(
+                    item.utility,
+                    reward,
+                    acc_val,
+                    alpha=self._utility_alpha,
+                    tau=self._utility_tau,
+                    u_min=self._utility_u_min,
+                    u_max=self._utility_u_max,
                 )
-            except Exception as e:
-                results.append({"index": idx, "id": skill_id, "ok": False, "error": str(e)})
-                continue
+                try:
+                    zone_result = self.update_with_zone_logic(
+                        skill_id, is_count_success, new_utility, old_utility=item.utility
+                    )
+                except Exception as e:
+                    r = {"index": idx, "id": skill_id, "ok": False, "error": str(e)}
+                    if n_skills > 1:
+                        r["sub"] = sub
+                    results.append(r)
+                    continue
 
-            results.append({"index": idx, "id": skill_id, "ok": True, **zone_result})
+                out: dict[str, Any] = {"index": idx, "id": skill_id, "ok": True, **zone_result}
+                if n_skills > 1:
+                    out["sub"] = sub
+                results.append(out)
 
         return results
 

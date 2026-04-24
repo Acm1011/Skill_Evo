@@ -739,14 +739,11 @@ class SolverRewardManager(AbstractRewardManager):
         compute_score=None,
         reward_fn_key="data_source",
         storage_path:str="",
-        filter_lower= 0.0,
-        filter_high= 1.0,
+       
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.storage_path = storage_path
-        self.low = filter_lower
-        self.high = filter_high
         
     def compute_score(
         self,
@@ -801,10 +798,8 @@ class SolverRewardManager(AbstractRewardManager):
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
         uids = data.non_tensor_batch["uid"]
-        uid2labels = defaultdict(list)
-        uid2all_labels = defaultdict(list)
+        uid2idx=defaultdict(list)
         
-        labels = []
         prompts = []
         responses = []
         responses_length = []
@@ -830,59 +825,19 @@ class SolverRewardManager(AbstractRewardManager):
             eos_token = self.tokenizer.eos_token
             if response_str.endswith(eos_token):
                 response_str = response_str[: -len(eos_token)]
-            label = custom_extract_boxed_content(response_str[-300:])
-            uid2all_labels[uids[i]].append(label if label is not None else 'None') 
+            
+            
 
-            if label is not None:
-                uid2labels[uids[i]].append(label)
             
             prompts.append(prompt_str)
             responses.append(response_str)
-        uid2ground_truths = defaultdict(lambda:None)   
-        ground_truths = []
-        for i in range(len(data)):
-            if 'ground_truth' in data[i].non_tensor_batch['reward_model']:
-                ground_truths.append(data[i].non_tensor_batch['reward_model']['ground_truth'])
-            else:
-                if uid2ground_truths[uids[i]] is not None:
-                    ground_truths.append(uid2ground_truths[uids[i]])
-                    continue
-                answers_count = {}
-                for res in list(uid2labels[uids[i]]):
-                    if not res: continue
-                    matched = False
-                    for exist_ans in list(set(answers_count.keys())):
-                        if res == exist_ans or ('no ' in res.lower() and 'no ' in exist_ans.lower()):
-                            answers_count[exist_ans] += 1
-                            matched = True
-                            break
-                        try:
-                            is_match = False
-                            is_match = grade_answer(str(res), str(exist_ans))
-                            if is_match:
-                                answers_count[exist_ans] += 1
-                                matched = True
-                                break
-                        except Exception as e:
-                            print(f"Error comparing '{res}' and '{exist_ans}': {e}")
-                            continue
-                    if not matched:
-                        answers_count[res] = 1
-                if not answers_count:
-                    majority_ans, max_count = '', 0
-                else:
-                    majority_ans = max(answers_count, key=answers_count.get)
-                    max_count = answers_count[majority_ans]
-                uid2ground_truths[uids[i]]=majority_ans
-                ground_truths.append(majority_ans)
+        
+       
         reward_infos = []
         uid2group_acc = defaultdict(list)
         for i in range(len(data)):
-            if self.num_examine > 0: # val data
-                expected_gt = data[i].non_tensor_batch['reward_model'].get('ground_truth', [])
-                assert expected_gt == ground_truths[i], f"val data ground_truth is not correct: expected {expected_gt}, got {ground_truths[i]}" 
-            
-            result = self.compute_score(responses[i], ground_truths[i])
+            uid2idx[uids[i]].append(i)
+            result = self.compute_score(responses[i], data[i].non_tensor_batch['reward_model']['ground_truth'])
             score: float
             valid_response_length = responses_length[i]
             if isinstance(result, dict):
@@ -898,35 +853,29 @@ class SolverRewardManager(AbstractRewardManager):
             reward = score
             reward_tensor[i, valid_response_length - 1] = reward
             
+        for (i, (uid, group_acc)) in enumerate(uid2group_acc.items()):
+            
             reward_infos.append(
                 {
-                    'idx':i,
+                    'idx':uid2idx[uid],
+                    "i":i,
+                    "uid":uid,
                     "step": step,
-                    "style": "val" if self.num_examine > 0 else "exp",
-                    "question": prompts[i],
-                    'raw_question': data[i].non_tensor_batch['raw_prompt'],
-                    "response": responses[i],
-                    "pred": result.get("pred", ""),
-                    "all_labels": uid2all_labels[uids[i]],
-                    'filtered_labels': uid2labels[uids[i]],
-                    "ground_truth(majority)": ground_truths[i],
-                    "reward": reward,
+                    "skill_id":list(data[uid2idx[uid][0]].non_tensor_batch['extra_info'].get("skill_id",[])),
+                    "group_infos":{
+                        "problem": str(data[uid2idx[uid][0]].non_tensor_batch['extra_info'].get("problem","")),
+                        "prompt": str(prompts[uid2idx[uid][0]]),
+                        "response": [str(responses[idx]) for idx in uid2idx[uid]],
+                        "acc": list(group_acc),
+                    }
+                    
                 }
             )
             
-        for i, example in enumerate(reward_infos):
-            acc_mean=float(np.mean(uid2group_acc[uids[i]]))
-            example.update({
-                'uid2group_acc':uid2group_acc[uids[i]],
-                'uid2acc_mean': acc_mean,
-                'is_kept': bool(acc_mean >= self.low and acc_mean <= self.high)
-            })
-            #print(f'{i=},{example=}')
+ 
         
 
         reward_extra_info['reward_infos'] = reward_infos
-        #reward_infos =[example.update({'uid2group_acc':uid2group_acc[uids[i]]}) for i, example in enumerate(reward_infos)]
-        #/root/users/ycy/Self-evolving-Agent/saved_results/Solver/Qwen3-4B-Base-V1
         reward_info_path_dir = f"{self.storage_path}/reward_info/"
         step_str = str(step).zfill(3)
         if self.num_examine > 0:

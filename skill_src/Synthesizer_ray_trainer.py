@@ -199,6 +199,24 @@ class SynthesizerRayTrainer(RayPPOTrainer):
                             reward_tensor, reward_extra_infos_dict = compute_reward(
                                 data=batch, reward_fn=self.reward_fn, step=self.global_steps
                             )
+                        if reward_extra_infos_dict:
+                            rd_list = reward_extra_infos_dict.get("reward_details")
+                            if rd_list:
+                                rd0 = rd_list[0]
+                                if isinstance(rd0, dict):
+                                    rd_metrics = {}
+                                    for k, v in rd0.items():
+                                        if v is None:
+                                            continue
+                                        if isinstance(v, bool):
+                                            rd_metrics[f"reward_detail/{k}"] = float(v)
+                                        elif isinstance(v, (int, float)):
+                                            vf = float(v)
+                                            if vf != vf:
+                                                continue
+                                            rd_metrics[f"reward_detail/{k}"] = vf
+                                    if rd_metrics:
+                                        metrics.update(rd_metrics)
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -239,26 +257,6 @@ class SynthesizerRayTrainer(RayPPOTrainer):
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
-
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                            rd_list = reward_extra_infos_dict.get("reward_details")
-                            if rd_list:
-                                rd0 = rd_list[0]
-                                if isinstance(rd0, dict):
-                                    rd_metrics = {}
-                                    for k, v in rd0.items():
-                                        if v is None:
-                                            continue
-                                        if isinstance(v, bool):
-                                            rd_metrics[f"reward_detail/{k}"] = float(v)
-                                        elif isinstance(v, (int, float)):
-                                            vf = float(v)
-                                            if vf != vf:
-                                                continue
-                                            rd_metrics[f"reward_detail/{k}"] = vf
-                                    if rd_metrics:
-                                        metrics.update(rd_metrics)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
