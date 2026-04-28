@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,43 @@ def _skill_item_from_synth_reward_row(
     return SkillItem.from_json_dict(flat)
 
 
+def _synth_question_group_key(d: dict[str, Any], line_no: int) -> str:
+    """同一步内、同一题的分组键；空题目用行号避免误合并。"""
+    raw = d.get("raw_q_info")
+    if isinstance(raw, dict):
+        q = str(raw.get("question", "")).strip()
+        if q:
+            return q
+    return f"__missing_question__:{line_no}"
+
+
+def _synth_row_rank_key(d: dict[str, Any]) -> tuple[float, int]:
+    """(reward, -idx) 供 max 比较：reward 大者优先，平手时 idx 小者优先。"""
+    try:
+        r = float(d.get("reward", 0.0))
+    except (TypeError, ValueError):
+        r = float("-inf")
+    try:
+        idx = int(d.get("idx", 0))
+    except (TypeError, ValueError):
+        idx = 0
+    return (r, -idx)
+
+
+def _pick_synth_rows_per_question(
+    synth_rows: list[tuple[int, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """每组 `raw_q_info.question` 只保留 reward 最大的一条；平手取更小 batch ``idx``。"""
+    by_q: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for _ln, d in synth_rows:
+        key = _synth_question_group_key(d, _ln)
+        by_q[key].append(d)
+    out: list[dict[str, Any]] = []
+    for rows in by_q.values():
+        out.append(max(rows, key=_synth_row_rank_key))
+    return out
+
+
 class SkillController:
     """持有一个 `SkillManager`，封装从 jsonl 读写的常见流程。"""
 
@@ -106,6 +144,7 @@ class SkillController:
         *,
         assign_id_if_missing: bool = True,
         use_eviction: bool = True,
+        memory_min_utility: float = 0.0,
     ) -> list[dict[str, Any]]:
         """从 jsonl 读取 skill 行，解析为 `SkillItem` 后批量插入 memory。
 
@@ -117,15 +156,20 @@ class SkillController:
         2. **Synth reward 日志**（与 ``skill_src/reward_manager.py`` 中
            ``{storage_path}/reward_info/exp_data_step_XXX.jsonl`` 一致）：含 ``skill_info``、
            ``raw_q_info``、``reward``、``traj_prompt_group`` 等；合法 JSON skill 在
-           ``skill_info.is_format``（dict）。``utility`` 取顶层 ``reward``；``problem`` 取
+           ``skill_info.is_format``（dict）。**同一** ``raw_q_info.question`` 在一步内可有多行
+          （多 traj）；**仅** ``reward`` 最大的一行可入池；其 ``reward`` 还须
+           ``>= memory_min_utility``。``utility`` 取 ``reward``；``problem`` 取
            ``raw_q_info.question``；缺 id 且 ``assign_id_if_missing`` 为 False 时使用
            ``synth_s{step}_i{idx}``，为 True 时交 ``insert_skills`` 分配。
+
+        非 synth 行：若 ``utility < memory_min_utility`` 则跳过。
 
         也可使用 ``ingest_skills_from_synth_reward_step(storage_path, step)``，由
         ``synth_reward_info_jsonl_path`` 拼出与 reward_manager 相同的路径。
         """
         p = Path(path)
         items: list[SkillItem] = []
+        synth_buffer: list[tuple[int, dict[str, Any]]] = []
         with p.open(encoding="utf-8") as f:
             for line_no, line in enumerate(f, 1):
                 line = line.strip()
@@ -141,17 +185,7 @@ class SkillController:
                     continue
 
                 if _is_synth_reward_jsonl_row(d):
-                    item = _skill_item_from_synth_reward_row(
-                        d, assign_id_if_missing=assign_id_if_missing
-                    )
-                    if item is None:
-                        print(
-                            f"[SkillController] skip line {line_no}: "
-                            f"not a valid synth reward skill row (missing skill dict)",
-                            file=sys.stderr,
-                        )
-                        continue
-                    items.append(item)
+                    synth_buffer.append((line_no, d))
                     continue
 
                 raw_id = str(d.get(JSON_KEY_ID, "") or "").strip()
@@ -163,7 +197,37 @@ class SkillController:
                 except (TypeError, ValueError) as e:
                     print(f"[SkillController] skip line {line_no}: {e}", file=sys.stderr)
                     continue
+                if item.utility < float(memory_min_utility):
+                    print(
+                        f"[SkillController] skip line {line_no}: utility {item.utility} < "
+                        f"memory_min_utility {memory_min_utility}",
+                        file=sys.stderr,
+                    )
+                    continue
                 items.append(item)
+
+        for d in _pick_synth_rows_per_question(synth_buffer):
+            try:
+                rw = float(d.get("reward", 0.0))
+            except (TypeError, ValueError):
+                rw = float("-inf")
+            if rw < float(memory_min_utility):
+                k = _synth_question_group_key(d, 0)
+                qshow = (k[:48] + "…") if len(k) > 48 else k
+                print(
+                    f"[SkillController] skip synth (question={qshow!r}): max reward {rw} < "
+                    f"memory_min_utility {memory_min_utility}",
+                    file=sys.stderr,
+                )
+                continue
+            item = _skill_item_from_synth_reward_row(d, assign_id_if_missing=assign_id_if_missing)
+            if item is None:
+                print(
+                    f"[SkillController] skip synth row: not a valid synth reward skill row",
+                    file=sys.stderr,
+                )
+                continue
+            items.append(item)
         return self._manager.insert_skills(items, use_eviction=use_eviction)
 
     def ingest_skills_from_synth_reward_step(
@@ -173,6 +237,7 @@ class SkillController:
         *,
         assign_id_if_missing: bool = True,
         use_eviction: bool = True,
+        memory_min_utility: float = 0.0,
     ) -> list[dict[str, Any]]:
         """读取 ``synth_reward_info_jsonl_path(storage_path, step)`` 并 ``ingest_skills_from_jsonl``。"""
         p = synth_reward_info_jsonl_path(storage_path, step)
@@ -182,6 +247,7 @@ class SkillController:
             p,
             assign_id_if_missing=assign_id_if_missing,
             use_eviction=use_eviction,
+            memory_min_utility=memory_min_utility,
         )
 
     def update_utilities_from_rewards_jsonl(
@@ -279,6 +345,18 @@ class SkillController:
                 })
         return out
 
+    @staticmethod
+    def _sanitize_extra_info_for_parquet(ex: dict[str, Any]) -> None:
+        """将 ``extra_info`` 中除 ``skill_id`` 外的 list 值转为 JSON 字符串，避免 pyarrow
+        写 parquet 时在 struct 字段上出现 str / list 混用（如部分样本 ``solution`` 为 str、部分为 list）。"""
+        for k, v in list(ex.items()):
+            if k == "skill_id":
+                continue
+            if isinstance(v, list):
+                ex[k] = json.dumps(v, ensure_ascii=False)
+            elif isinstance(v, dict):
+                SkillController._sanitize_extra_info_for_parquet(v)
+
     def prepare_solver_skills(
         self,
         jsonl_path: str | Path,
@@ -290,9 +368,10 @@ class SkillController:
     ) -> Path:
         """从 DeepMath 风格 jsonl 读入样本，按 `extra_info[problem_key]` 检索 skill，
 
-        用 ``prompt/skill_use_v1`` 等模板拼好 user 文本，将 ``prompt`` 中首个 user
-        消息的 ``content`` 替换为该文本，并在 ``extra_info`` 中写入 ``skill_id``（检索到的
-        id 列表），最后写入 ``out_parquet``（默认 `train.parquet`，路径可统一调整）。
+        用 ``prompt/skill_use_v1`` 等模板拼好 user 文本；先从 ``prompt`` 列表中去掉
+        ``role==system`` 的消息，再将首个 user 消息的 ``content`` 替换为该文本，并在
+        ``extra_info`` 中写入 ``skill_id``（检索到的 id 列表），最后写入 ``out_parquet``
+        （默认 `train.parquet`，路径可统一调整）。
 
         无效行、缺字段、检索失败会跳过并打 stderr 日志，不中断整文件处理。
         """
@@ -357,6 +436,13 @@ class SkillController:
 
                 rec = copy.deepcopy(d)
                 pl = rec.get("prompt")
+                if isinstance(pl, list):
+                    pl = [
+                        m
+                        for m in pl
+                        if not (isinstance(m, dict) and m.get("role") == "system")
+                    ]
+                    rec["prompt"] = pl
                 if not self._apply_first_user_content(pl, new_content):
                     print(
                         f"[SkillController] prepare_solver_skills skip line {line_no}: no user message in prompt",
@@ -368,6 +454,7 @@ class SkillController:
                     ex = {}
                     rec["extra_info"] = ex
                 ex["skill_id"] = [s.id for s in skills]
+                SkillController._sanitize_extra_info_for_parquet(ex)
                 rows.append(rec)
 
         try:

@@ -14,7 +14,16 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
 import re
-from typing import Optional
+from typing import Optional, Union
+
+
+def _as_answer_str(x) -> str:
+    """Coerce a scalar ground-truth value to str (e.g. parquet int/float)."""
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    return str(x)
 
 
 def last_boxed_only_string(string: str) -> Optional[str]:
@@ -121,15 +130,24 @@ REMOVED_EXPRESSIONS = [
 ]
 
 
-def normalize_final_answer(final_answer: str) -> str:
+def normalize_final_answer(final_answer: Union[str, list, tuple]) -> str:
     """Normalize a final answer to a quantitative reasoning question.
 
     Args:
-        final_answer: The answer string to normalize
+        final_answer: The answer string to normalize, or a one-element list/tuple from some loaders
 
     Returns:
         Normalized answer string
     """
+    if isinstance(final_answer, (list, tuple)):
+        if len(final_answer) == 1:
+            return normalize_final_answer(final_answer[0])
+        # Multi-answer must be compared in the caller (e.g. is_correct_minerva), not coerced here
+        raise TypeError(
+            f"normalize_final_answer expected a str or 1-item list; got len={len(final_answer)}"
+        )
+    if not isinstance(final_answer, str):
+        final_answer = _as_answer_str(final_answer)
     final_answer = final_answer.split("=")[-1]
 
     # Apply substitutions and removals
@@ -163,13 +181,16 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 def is_correct_minerva(
-    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)"
+    solution_str: str,
+    gt: Union[str, list, tuple],
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)",
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
     Args:
         solution_str: The solution string to check
-        gt: The ground truth answer
+        gt: The ground truth answer (or list of acceptable answers, e.g. from parquet)
         gt_need_extract: Whether the ground truth needs extraction
         answer_pattern: Regex pattern to extract the answer
 
@@ -181,23 +202,34 @@ def is_correct_minerva(
     extracted_answer = match[-1] if match else "[INVALID]"
     pred = normalize_final_answer(extracted_answer)
 
-    # Process ground truth
-    if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
-    else:
-        gt = normalize_final_answer(gt)
+    def _norm_one_ground_truth(g) -> str:
+        if gt_need_extract:
+            s = _as_answer_str(g)
+            boxed = last_boxed_only_string(s)
+            return (
+                normalize_final_answer(remove_boxed(boxed)) if boxed is not None else ""
+            )
+        return normalize_final_answer(_as_answer_str(g))
 
-    return (pred == gt), pred
+    # Some datasets pass ground truth as a list of acceptable strings
+    if isinstance(gt, (list, tuple)):
+        normalized_gts = [_norm_one_ground_truth(g) for g in gt]
+        return (pred in normalized_gts), pred
+
+    gt_norm = _norm_one_ground_truth(gt)
+    return (pred == gt_norm), pred
 
 
 def is_correct_strict_box(
-    pred: str, gt: str, pause_tokens_index: Optional[list[int]] = None
+    pred: str,
+    gt: Union[str, list, tuple],
+    pause_tokens_index: Optional[list[int]] = None,
 ) -> tuple[int, Optional[str]]:
     """Check if the prediction is correct using strict boxed answer criteria.
 
     Args:
         pred: The prediction string
-        gt: The ground truth answer
+        gt: The ground truth answer (or list of acceptable answers)
         pause_tokens_index: Indices of pause tokens
 
     Returns:
@@ -214,11 +246,16 @@ def is_correct_strict_box(
     boxed_pred = last_boxed_only_string(pred)
     extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
 
-    return 1 if (extracted_pred == gt) else -1, extracted_pred
+    if isinstance(gt, (list, tuple)):
+        return (1 if (extracted_pred in gt) else -1), extracted_pred
+    return (1 if (extracted_pred == gt) else -1), extracted_pred
 
 
 def verify(
-    solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
+    solution_str: str,
+    answer: Union[str, list, tuple],
+    strict_box_verify: bool = False,
+    pause_tokens_index: Optional[list[int]] = None,
 ) -> bool:
     """Verify if the solution is correct.
 
@@ -241,7 +278,7 @@ def verify(
 
 def compute_score(
     solution_str: str,
-    ground_truth: str,
+    ground_truth: Union[str, list, tuple],
     strict_box_verify: bool = False,
     pause_tokens_index: Optional[list[int]] = None,
 ) -> float:

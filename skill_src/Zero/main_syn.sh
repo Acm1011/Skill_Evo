@@ -49,14 +49,16 @@ data_file="${SE_DATA_DIR}/${data_name}.jsonl"
 # =============================================================================
 # 实验命名
 # =============================================================================
+project_name="${SE_PROJECT_NAME:-Skill_Evo}"
+export project_name
 variant="data_${data_name}_model_${base_model_name}"
 exp_name="${variant}-V1"
 
 # =============================================================================
-# 实验产物路径（skill_saved/<exp_name>/Synthesizer|Solver）
+# 实验产物路径（skill_saved/<project_name>/<exp_name>/Synthesizer|Solver）
 # =============================================================================
 SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
-export SE_SAVED_RESULTS_DIR="${SE_SAVED_RESULTS_DIR:-${SE_SKILL_SAVED_ROOT}/${exp_name}}"
+export SE_SAVED_RESULTS_DIR="${SE_SAVED_RESULTS_DIR:-${SE_SKILL_SAVED_ROOT}/${project_name}/${exp_name}}"
 export SE_Synthsizer_DIR="${SE_Synthsizer_DIR:-${SE_SAVED_RESULTS_DIR}/Synthesizer}"
 export SE_SOLVER_DIR="${SE_SOLVER_DIR:-${SE_SAVED_RESULTS_DIR}/Solver}"
 export SE_TENSORBOARD_DIR="${SE_TENSORBOARD_DIR:-${SE_Synthsizer_DIR}/tensorboard_log}"
@@ -65,17 +67,27 @@ mkdir -p "${SE_Synthsizer_DIR}" "${SE_SOLVER_DIR}" "${SE_TENSORBOARD_DIR}" "${SE
 
 # =============================================================================
 # Offline Rollout 参数
+# mult 只放大 offline 采集；PPO 仍为 T 步，见 Synthesizer.sh
 # =============================================================================
-export SE_OFFLINE_ROLLOUT_STEPS="${SE_OFFLINE_ROLLOUT_STEPS:-2}"
+export SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER="${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-2}}"
 export SE_OFFLINE_ROLLOUT_BATCH_SIZE="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-16}"
 export SE_OFFLINE_ROLLOUT_N="${SE_OFFLINE_ROLLOUT_N:-4}"
 export SE_OFFLINE_NUM_RANDOM_Q="${SE_OFFLINE_NUM_RANDOM_Q:-4}"
 export SE_OFFLINE_SKILL_TYPE="${SE_OFFLINE_SKILL_TYPE:-skill_generation_v1}"
 
+export SE_MEMORY_MIN_UTILITY="${SE_MEMORY_MIN_UTILITY:-0}"
+
 # =============================================================================
-# Synthesizer RL 训练超参数
+# Synthesizer RL：PPO 步 = 基座 T；offline driver 步 = T×mult
 # =============================================================================
-synthesizer_training_steps="${SE_SYNTHESIZER_TRAINING_STEPS:-2}"
+SE_SYNTHESIZER_TRAINING_STEPS_BASE="${SE_SYNTHESIZER_TRAINING_STEPS:-2}"
+export SE_SYNTHESIZER_TRAINING_STEPS_BASE
+SE_OFFLINE_ROLLOUT_DRIVER_STEPS=$(( SE_SYNTHESIZER_TRAINING_STEPS_BASE * SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER ))
+export SE_OFFLINE_ROLLOUT_DRIVER_STEPS
+synthesizer_training_steps="${SE_SYNTHESIZER_TRAINING_STEPS_BASE}"
+export synthesizer_training_steps
+export SE_SYNTHESIZER_STEPS="${synthesizer_training_steps}"
+export SE_SYNTHESIZER_TRAINING_STEPS="${SE_SYNTHESIZER_TRAINING_STEPS_BASE}"
 
 export SYNTH_BATCH_SIZE="${SYNTH_BATCH_SIZE:-16}"
 export SYNTH_ROLLOUT_QUERY_NUM="${SYNTH_ROLLOUT_QUERY_NUM:-4}"
@@ -102,14 +114,16 @@ exec > >(tee -a "${SE_Synthsizer_DIR}/logs/train_synth_${variant}-$(now).log") 2
 echo "=============================================="
 echo "  main.sh - 参数配置总览"
 echo "=============================================="
+echo "  project_name:         ${project_name}"
 echo "  exp_name:             ${exp_name}"
+echo "  SE_SAVED_RESULTS_DIR: ${SE_SAVED_RESULTS_DIR}"
 echo "  synthesizer_model:    ${synthesizer_model_path}"
 echo "  solver_model:         ${solver_model_path}"
 echo "  data_file:            ${data_file}"
 echo "  training_steps:       ${synthesizer_training_steps}"
 echo ""
 echo "  offline rollout:"
-echo "    steps=${SE_OFFLINE_ROLLOUT_STEPS}  batch=${SE_OFFLINE_ROLLOUT_BATCH_SIZE}"
+echo "    rollout_batch_mult=${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER}  batch=${SE_OFFLINE_ROLLOUT_BATCH_SIZE}"
 echo "    rollout_n=${SE_OFFLINE_ROLLOUT_N}  random_q=${SE_OFFLINE_NUM_RANDOM_Q}"
 echo "    skill_type=${SE_OFFLINE_SKILL_TYPE}"
 echo "    embedding_cache_path=${embedding_cache_path:-<empty>}"

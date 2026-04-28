@@ -29,8 +29,8 @@
 #   SE_ROLLOUT_HOST        - Rollout URL 主机（默认 127.0.0.1）
 #   SE_ROLLOUT_SERVER_URLS - 空格分隔，供 driver: --server-urls $SE_ROLLOUT_SERVER_URLS
 #   test-rollout 可选 --model；未传时由 test_solver_rollout.sh 使用 DEFAULT_ROLLOUT_MODEL（见该脚本）
-#   SE_SKILL_SAVED_ROOT    - 实验产物根（默认 /home/ycy/sdi/skill_saved）；完整路径由 main.sh 在 exp_name 确定后设置:
-#                             \$SE_SKILL_SAVED_ROOT/<exp_name>/Synthesizer|Solver
+#   SE_SKILL_SAVED_ROOT    - 实验根（默认 <SE_BASE_DIR>/skill_saved）；子目录由 SE_PROJECT_NAME 分 suite：
+#                             \$SE_SKILL_SAVED_ROOT/<如 Skill_Evo>/<exp_name>/Synthesizer|Solver
 #   SE_Synthsizer_DIR 等   - 训练时由 main.sh export；test-rollout 不经 main 时见各测试脚本内默认
 #   （Ray 临时目录在 main_synthesizer：默认 $SE_RAY_TEMP_ROOT/r-$USER，SE_RAY_TEMP_ROOT 默认 /home/ycy/sdi）
 #
@@ -50,7 +50,7 @@ GPU_MEMORY_THRESHOLD_MB="${GPU_MEMORY_THRESHOLD_MB:-40000}"      # 显存占用�
 GPU_UTIL_THRESHOLD="${GPU_UTIL_THRESHOLD:-20}"                  # 利用率低于此值视为空闲(%)
 
 # 轮询配置
-POLL_INTERVAL="${POLL_INTERVAL:-1800}"                            # 检查间隔（秒）
+POLL_INTERVAL="${POLL_INTERVAL:-600}"                            # 检查间隔（秒）
 MAX_WAIT_HOURS="${MAX_WAIT_HOURS:-48}"                          # 最大等待时间（小时）
 
 # Rollout Server 配置
@@ -70,11 +70,13 @@ SE_WORKING_DIR="${SE_BASE_DIR}/${SE_PROJECT_NAME}"
 SE_MODEL_DIR="${SE_MODEL_DIR:-${SE_BASE_DIR}/models}"
 SE_DATA_DIR="${SE_DATA_DIR:-${SE_BASE_DIR}/data}"
 SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-${SE_BASE_DIR}/skill_saved}"
+# 与 gen_query.sh / challenger.sh 一致；未 export 时默认同 $(WORKING_DIR)/$(SE_CODE_MODULE)
+SE_PROMPT_DIR="${SE_PROMPT_DIR:-${SE_WORKING_DIR}/${SE_CODE_MODULE}}"
 # SE_SYNTHESIZER_DIR="${SE_SYNTHESIZER_DIR:-${SE_SKILL_SAVED_ROOT}/Synthesizer}"
 # SE_SOLVER_DIR="${SE_SOLVER_DIR:-${SE_SKILL_SAVED_ROOT}/Solver}"
-TENSORBOARD_PATH="${TENSORBOARD_PATH:-${SE_SKILL_SAVED_ROOT}/tensorboard_log}"
+TENSORBOARD_PATH="${TENSORBOARD_PATH:-${SE_SKILL_SAVED_ROOT}/${SE_PROJECT_NAME}/tensorboard_log}"
 
-mkdir -p "${SE_SKILL_SAVED_ROOT}"  "${TENSORBOARD_PATH}"
+mkdir -p "${SE_SKILL_SAVED_ROOT}" "${SE_SKILL_SAVED_ROOT}/${SE_PROJECT_NAME}" "${TENSORBOARD_PATH}"
 # =============================================================================
 # 辅助函数
 # =============================================================================
@@ -375,8 +377,8 @@ setup_gpu_env() {
     echo "工作目录:          $SE_WORKING_DIR"
     echo "模型目录:          $SE_MODEL_DIR"
     echo "数据目录:          $SE_DATA_DIR"
-    echo "skill_saved 根目录: $SE_SKILL_SAVED_ROOT"
-    echo "  （训练时由 main.sh 设置 SE_SAVED_RESULTS_DIR 等: \$SE_SKILL_SAVED_ROOT/<exp_name>/...）"
+    echo "skill_saved 根目录: $SE_SKILL_SAVED_ROOT  （子目录: \$SE_PROJECT_NAME/<exp_name>/...）"
+    echo "  （训练时由 main 设置: \$SE_SKILL_SAVED_ROOT/$SE_PROJECT_NAME/<exp_name>/Synthesizer|Solver|...）"
     echo "Prompt目录:        $SE_PROMPT_DIR"
     echo "=============================================="
     echo ""
@@ -480,12 +482,12 @@ main() {
     log_info "启动训练..."
     echo ""
     echo "=============================================="
-    echo "  开始执行 main.sh"
+    echo "  开始执行 main_o.sh"
     echo "=============================================="
     echo ""
     
     # 执行 main.sh
-    bash "${SCRIPT_DIR}/main.sh"
+    bash "${SCRIPT_DIR}/main_o.sh"
     
     local exit_code=$?
     

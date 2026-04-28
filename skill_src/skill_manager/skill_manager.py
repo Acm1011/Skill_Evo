@@ -520,7 +520,11 @@ class SkillManager:
             return []
 
         candidates = [
-            {"problem_type": it.problem_type, "utility": it.utility}
+            {
+                "id": it.id,
+                "problem_type": it.problem_type,
+                "utility": it.utility,
+            }
             for it in items
         ]
         payload: dict[str, Any] = {
@@ -550,6 +554,25 @@ class SkillManager:
 
         ranked_indices: list[int] = data["ranked_indices"]
         return [items[i] for i in ranked_indices]
+
+    def sync_retriever_doc_cache(self) -> None:
+        """将当前主库中全部 skill 的 ``problem_type`` 文档嵌入同步到 retriever（``POST /docs/replace`` 全量替换）。"""
+        try:
+            import requests as _req
+        except ImportError as e:
+            raise ImportError("需要安装 requests：pip install requests") from e
+        its = self.list_all()
+        items = [{"id": it.id, "text": it.problem_type} for it in its]
+        resp = _req.post(
+            f"{self._retriever_url}/docs/replace",
+            json={"items": items},
+            timeout=self._retriever_timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            err = data.get("error", data)
+            raise RuntimeError(f"retriever_server /docs/replace 失败: {err}")
 
     @staticmethod
     def skills_block_for_template(skills: list[SkillItem]) -> str:

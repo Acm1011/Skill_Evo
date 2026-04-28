@@ -63,6 +63,7 @@ done
 if ! [[ "$synthesizer_training_steps" =~ ^[0-9]+$ ]]; then
     echo "Error: synthesizer_training_steps 必须是数字，当前值: $synthesizer_training_steps"; exit 1
 fi
+SYNTH_PPO_STEPS="${synthesizer_training_steps}"
 [ -d "$synthesizer_model_path" ] || { echo "Error: synthesizer_model_path 不存在: $synthesizer_model_path"; exit 1; }
 [ -d "$solver_model_path" ]      || { echo "Error: solver_model_path 不存在: $solver_model_path"; exit 1; }
 [ -f "$data_file" ]              || { echo "Error: data_file 不存在: $data_file"; exit 1; }
@@ -293,13 +294,20 @@ else
     mkdir -p "${OFFLINE_WORK_DIR}" "${OFFLINE_MERGE_DIR}"
 
     echo "  data_file: ${data_file}"
-    echo "  steps=${SE_OFFLINE_ROLLOUT_STEPS}  batch=${SE_OFFLINE_ROLLOUT_BATCH_SIZE}  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
+    SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER="${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-2}}"
+    export SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER
+    OFFLINE_DRIVER_STEPS=$(( SYNTH_PPO_STEPS * SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER ))
+    OFFLINE_DRIVER_BATCH="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-${SYNTH_BATCH_SIZE:-16}}"
+    _OFFLINE_NEED=$(( OFFLINE_DRIVER_STEPS * OFFLINE_DRIVER_BATCH ))
+    echo "  PPO 训练步数 T=${SYNTH_PPO_STEPS}"
+    echo "  offline driver: --steps ${OFFLINE_DRIVER_STEPS} (= T×mult)  --batch-size ${OFFLINE_DRIVER_BATCH}  (need target=${_OFFLINE_NEED} rows; mult=${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER})  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
+    SE_OFFLINE_RESET_STATE="${SE_OFFLINE_RESET_STATE:-0}"
 
     offline_cmd=(
         "${PYTHON}" -m "${SE_CODE_MODULE}.solver_offline_driver" run
         --data-files "${data_file}"
-        --steps "${SE_OFFLINE_ROLLOUT_STEPS}"
-        --batch-size "${SE_OFFLINE_ROLLOUT_BATCH_SIZE}"
+        --steps "${OFFLINE_DRIVER_STEPS}"
+        --batch-size "${OFFLINE_DRIVER_BATCH}"
         --work-dir "${OFFLINE_WORK_DIR}"
         --merge-output-dir "${OFFLINE_MERGE_DIR}"
         --merge-prefix "train_data"
@@ -307,8 +315,11 @@ else
         --rollout-n "${SE_OFFLINE_ROLLOUT_N}"
         --num-random-questions "${SE_OFFLINE_NUM_RANDOM_Q}"
         --model-path "${solver_model_path}"
-        --reset-state
     )
+    if [ "${SE_OFFLINE_RESET_STATE}" = "1" ]; then
+        offline_cmd+=(--reset-state)
+        echo "  [offline] SE_OFFLINE_RESET_STATE=1：从 cursor=0 重置 state"
+    fi
     if [ -n "$embedding_cache_path" ]; then
         offline_cmd+=(--embedding-cache-path "${embedding_cache_path}")
     fi
@@ -368,6 +379,9 @@ use_skill_type="${SYNTH_USE_SKILL_TYPE}"
 
 ppo_mini_batch_size=$((batch_size / 4))
 micro_batch_size_per_gpu=$((ppo_mini_batch_size / 4))
+if [ "${micro_batch_size_per_gpu}" -lt 1 ]; then
+    micro_batch_size_per_gpu=1
+fi
 
 echo "  训练 GPU: ${SYNTH_GPU_IDS} (${N_SYNTH_GPUS} 张)"
 echo "  batch=${batch_size}   kl=${kl_loss_coef}  temp=${query_temperature}"
@@ -375,6 +389,7 @@ echo "  batch=${batch_size}   kl=${kl_loss_coef}  temp=${query_temperature}"
 CUDA_VISIBLE_DEVICES=${SYNTH_GPU_IDS} "${PYTHON}" -m "${SE_CODE_MODULE}.main_synthesizer" \
     algorithm.adv_estimator=grpo \
     data.train_files="${TRAIN_DATA_FILE}" \
+    data.shuffle=False \
     data.train_batch_size=${batch_size} \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -415,13 +430,13 @@ CUDA_VISIBLE_DEVICES=${SYNTH_GPU_IDS} "${PYTHON}" -m "${SE_CODE_MODULE}.main_syn
     trainer.project_name="${SE_PROJECT_NAME}" \
     trainer.experiment_name="Synthesizer-${exp_name}" \
     trainer.n_gpus_per_node=${N_SYNTH_GPUS} \
-    trainer.total_training_steps=${synthesizer_training_steps} \
+    trainer.total_training_steps=${SYNTH_PPO_STEPS} \
     trainer.nnodes=1 \
     trainer.val_before_train=False \
     trainer.default_local_dir=${CKPTS_DIR} \
-    trainer.save_freq=${synthesizer_training_steps} \
+    trainer.save_freq=10 \
     trainer.test_freq=-1 \
-    trainer.total_epochs=15 &
+    trainer.total_epochs=1 &
 
 TRAINING_PID=$!
 wait $TRAINING_PID

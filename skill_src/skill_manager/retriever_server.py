@@ -14,13 +14,19 @@
 Query 使用 Instruct 格式（适配 Qwen3-Embedding）：
   "Instruct: {task_description}\nQuery:{question}"
 Document 直接传入原文，无需 instruct 前缀。
+
+指定 ``--doc-cache-dir``（或由 ``MEMORY_PATH_DIR``/``SE_MEMORY_DIR`` 默认得到
+``<Memory>/doc_embed_cache``）时，document 嵌入会落盘为 ``emb_<sha256(id)>.npy``，
+与 ``/docs/replace`` 全量一致；进程重启后可从磁盘恢复，避免仅依赖内存。
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 try:
@@ -45,6 +51,41 @@ _last_call_time: float = time.monotonic()
 _idle_timeout: float = 300.0
 _idle_timer: threading.Timer | None = None
 _idle_lock = threading.Lock()
+# 按 skill id 缓存 document 侧 L2 归一化向量，与 /docs/replace 全量同步
+_doc_cache: dict[str, np.ndarray] = {}
+_doc_cache_lock = threading.Lock()
+# 非空时：将向量同步写入该目录下 emb_*.npy；/rank 在内存未命中时尝试读盘
+_doc_cache_dir: str | None = None
+
+
+def _embed_filename_for_id(skill_id: str) -> str:
+    h = hashlib.sha256(skill_id.encode("utf-8")).hexdigest()
+    return f"emb_{h}.npy"
+
+
+def _load_doc_vec_from_disk(skill_id: str) -> np.ndarray | None:
+    if not _doc_cache_dir:
+        return None
+    p = Path(_doc_cache_dir) / _embed_filename_for_id(skill_id)
+    if not p.is_file():
+        return None
+    return np.load(p).astype(np.float64)
+
+
+def _persist_doc_cache_to_dir(ids: list[str], vecs: np.ndarray) -> None:
+    """全量替换目录：清空 emb_*.npy 后写入当前 vectors。"""
+    if not _doc_cache_dir:
+        return
+    d = Path(_doc_cache_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    for f in d.glob("emb_*.npy"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    for i, sid in enumerate(ids):
+        if i < int(vecs.shape[0]):
+            np.save(d / _embed_filename_for_id(sid), vecs[i])
 
 
 # ─── instruct 格式化 ───────────────────────────────────────────────────────────
@@ -138,13 +179,58 @@ def _encode_documents(model: Any, texts: list[str]) -> np.ndarray:
 def health():
     with _model_lock:
         loaded = _model is not None
+    with _doc_cache_lock:
+        n_cache = len(_doc_cache)
     return jsonify({
         "ok": True,
         "model_loaded": loaded,
         "model_name": _model_name,
         "idle_timeout": _idle_timeout,
         "idle_remaining": max(0.0, round(_idle_timeout - (time.monotonic() - _last_call_time), 1)),
+        "doc_cache_size": n_cache,
+        "doc_cache_dir": _doc_cache_dir,
     })
+
+
+@app.post("/docs/replace")
+def docs_replace():
+    """全量替换 document 嵌入缓存。body: ``{\"items\": [{\"id\": str, \"text\": str}, ...]}``。"""
+    global _doc_cache
+    body = request.get_json(silent=True) or {}
+    items = body.get("items")
+    if not isinstance(items, list):
+        return jsonify({"ok": False, "error": "'items' must be a list"}), 400
+    for it in items:
+        if not isinstance(it, dict):
+            return jsonify({"ok": False, "error": "each item must be an object"}), 400
+        sid = it.get("id")
+        if not isinstance(sid, str) or not sid.strip():
+            return jsonify({"ok": False, "error": "each item needs non-empty 'id'"}), 400
+        if "text" not in it or not isinstance(it.get("text"), str):
+            return jsonify({"ok": False, "error": "each item needs string 'text' (problem_type)"}), 400
+
+    _reset_idle_timer()
+
+    texts = [str(it.get("text") or "") for it in items]
+    ids = [str(it["id"]).strip() for it in items]
+
+    with _model_lock:
+        model = _load_model()
+        if not texts:
+            vecs = np.zeros((0, 1), dtype=np.float64)
+        else:
+            vecs = _encode_documents(model, texts).astype(np.float64)
+
+    new_cache: dict[str, np.ndarray] = {}
+    for i, sid in enumerate(ids):
+        if i < vecs.shape[0]:
+            new_cache[sid] = vecs[i]
+    with _doc_cache_lock:
+        _doc_cache = new_cache
+
+    _persist_doc_cache_to_dir(ids, vecs)
+
+    return jsonify({"ok": True, "n": len(new_cache), "doc_cache_dir": _doc_cache_dir})
 
 
 @app.post("/encode")
@@ -185,7 +271,7 @@ def rank():
     {
       "question": str,
       "candidates": [
-        {"problem_type": str, "utility": float},
+        {"id": str | null, "problem_type": str, "utility": float},
         ...
       ],
       "mode": "embedding" | "hybrid",
@@ -193,6 +279,7 @@ def rank():
       "top_k": int | null
     }
     ```
+    ``id`` 若与 ``POST /docs/replace`` 中缓存一致，则 document 侧优先用缓存向量。
     返回：
     ```json
     {"ok": true, "ranked_indices": [int, ...]}
@@ -232,14 +319,43 @@ def rank():
 
     _reset_idle_timer()
 
+    n_c = len(candidates)
+    doc_rows: list[np.ndarray | None] = [None] * n_c
+    need_idx: list[int] = []
+    need_texts: list[str] = []
+    for i, c in enumerate(candidates):
+        sid = c.get("id")
+        if isinstance(sid, str) and sid.strip():
+            st = sid.strip()
+            with _doc_cache_lock:
+                hit = _doc_cache.get(st)
+            if hit is not None:
+                doc_rows[i] = hit.astype(np.float64)
+                continue
+            dsk = _load_doc_vec_from_disk(st)
+            if dsk is not None:
+                doc_rows[i] = dsk
+                with _doc_cache_lock:
+                    _doc_cache[st] = dsk
+                continue
+        need_idx.append(i)
+        need_texts.append(doc_texts[i])
+
     with _model_lock:
         model = _load_model()
-        # question 套 instruct，documents 直接编码，一次 vLLM 调用批量处理
-        all_texts = [_build_query_text(question.strip())] + doc_texts
-        all_vecs = _embed(model, all_texts).astype(np.float64)
+        q_vec = _encode_queries(model, [question.strip()]).astype(np.float64)[0]
+        if need_texts:
+            enc = _encode_documents(model, need_texts).astype(np.float64)
+            for j, row_i in enumerate(need_idx):
+                doc_rows[row_i] = enc[j]
 
-    q_vec = all_vecs[0]
-    doc_mat = all_vecs[1:]
+    parts: list[np.ndarray] = []
+    for i in range(n_c):
+        v = doc_rows[i]
+        if v is None:
+            return jsonify({"ok": False, "error": "internal: incomplete doc encodings"}), 500
+        parts.append(v)
+    doc_mat = np.stack(parts, axis=0)
 
     if doc_mat.size == 0:
         order = list(range(len(candidates)))
@@ -294,11 +410,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.9,
         help="vLLM 显存占用比例 0~1（默认 0.9）；embedding 模型较小可设低值如 0.3",
     )
+    p.add_argument(
+        "--doc-cache-dir",
+        type=str,
+        default="",
+        help="Document 嵌入落盘目录（*.npy）；空则环境 SE_RETRIEVER_DOC_CACHE_DIR 或 <MEMORY_PATH_DIR>/doc_embed_cache",
+    )
     return p.parse_args(argv)
+
+
+def _resolve_doc_cache_dir(cli_value: str) -> str | None:
+    s = (cli_value or "").strip()
+    if not s:
+        s = (os.environ.get("SE_RETRIEVER_DOC_CACHE_DIR") or os.environ.get("RETRIEVER_DOC_CACHE_DIR") or "").strip()
+    if not s:
+        mem = (os.environ.get("MEMORY_PATH_DIR") or os.environ.get("SE_MEMORY_DIR") or "").strip()
+        if mem:
+            s = str(Path(mem) / "doc_embed_cache")
+    return s or None
 
 
 def main(argv: list[str] | None = None) -> None:
     global _model_name, _instruct_task, _idle_timeout, _tensor_parallel_size, _gpu_memory_utilization
+    global _doc_cache_dir
 
     args = _parse_args(argv)
     _model_name = args.embedding_model
@@ -306,6 +440,7 @@ def main(argv: list[str] | None = None) -> None:
     _idle_timeout = args.idle_timeout
     _tensor_parallel_size = args.tensor_parallel_size
     _gpu_memory_utilization = args.gpu_memory_utilization
+    _doc_cache_dir = _resolve_doc_cache_dir(args.doc_cache_dir)
 
     with _model_lock:
         _load_model()
@@ -314,7 +449,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(
         f"[retriever_server] Listening http://{args.host}:{args.port} "
-        f"(idle_timeout={_idle_timeout}s)",
+        f"(idle_timeout={_idle_timeout}s) doc_cache_dir={_doc_cache_dir!r}",
         flush=True,
     )
     app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)

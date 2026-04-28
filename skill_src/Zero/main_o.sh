@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# 训练入口：Synthesizer → memory(after_sync) → Solver → memory(after_solver)，按 V1..Vn 展开（n = skill_evo_num_rounds）。
+# SE_RESUME=1|true|yes：若已有对应当前步数的 Synthesizer/Solver checkpoint 与 memory 产物，则跳过该子步骤。
+#  Synthesizer：若已有 global_step_* 最终 ckpt 则整段不跑；若无 ckpt 但 Synthesizer/<Vn>/merged/train_data.parquet（或
+#  train_data.jsonl）已存在，则仅跳过 offline（由 SE_SYNTH_SKIP_OFFLINE=1 传入 Synthesizer.sh），仍跑 reward+RL。缺 memory
+#  仍跑 after_sync/after_solver。续训步数须与已存在 ckpt 步数一致时 skip 最可靠。Synthesizer 内 verl 为 resume_mode=auto。
 
 set -xeuo pipefail
 # 获取脚本所在目录
@@ -25,14 +30,14 @@ data_file=${SE_DATA_DIR}/${data_name}.jsonl
 
 project_name="${SE_PROJECT_NAME:-Skill_Evo}"
 export project_name
-exp_name=data_${data_name}_model_${base_model_name}
+exp_name=data_${data_name}_model_${base_model_name}_v1
 export exp_name
 variant="${exp_name}"
-initial_version=V1
 SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
+# 产物：skill_saved/<项目名,如 Skill_Evo>/<原实验名 data_*_model_* >/Synthesizer|Solver|Memory|...
 
 WORKING_DIR="${SE_WORKING_DIR:-${dir}/${project_name}}"
-saved_results_dir="${SE_SAVED_RESULTS_DIR:-${SE_SKILL_SAVED_ROOT}/${exp_name}}"
+saved_results_dir="${SE_SAVED_RESULTS_DIR:-${SE_SKILL_SAVED_ROOT}/${project_name}/${exp_name}}"
 synthesizer_path_dir="${SE_SYNTHESIZER_DIR:-${saved_results_dir}/Synthesizer}"
 solver_path_dir="${SE_SOLVER_DIR:-${saved_results_dir}/Solver}"
 memory_path_dir="${SE_MEMORY_DIR:-${saved_results_dir}/Memory}"
@@ -42,8 +47,12 @@ TENSORBOARD_PATH="${TENSORBOARD_PATH:-${tensorboard_dir}}"
 export TENSORBOARD_PATH tensorboard_dir
 
 mkdir -p ${saved_results_dir} ${synthesizer_path_dir} ${solver_path_dir} ${memory_path_dir} ${log_path_dir} ${tensorboard_dir}
+export SE_SAVED_RESULTS_DIR="${saved_results_dir}"
 export SYNTHESIZER_PATH_DIR=${synthesizer_path_dir}
 export SOLVER_PATH_DIR=${solver_path_dir}
+# 与 main.sh / evaluation 脚本中的 SE_* 一致，便于子进程解析路径
+export SE_Synthsizer_DIR="${synthesizer_path_dir}"
+export SE_SOLVER_DIR="${solver_path_dir}"
 export MEMORY_PATH_DIR=${memory_path_dir}
 export LOG_PATH_DIR=${log_path_dir}
 export EXP_NAME=${exp_name}
@@ -59,35 +68,56 @@ export SE_CODE_MODULE="${SE_CODE_MODULE:-skill_src}"
 # =============================================================================
 # GPU 拓扑（Synthesizer.sh 需要 SE_N_GPUS / SE_GPU_IDS；请与 retriever 用卡错开避免争用）
 # =============================================================================
-SE_N_GPUS="${SE_N_GPUS:-8}"
-SE_GPU_IDS="${SE_GPU_IDS:-0,1,2,3,4,5,6,7}"
+SE_N_GPUS="${SE_N_GPUS:-4}"
+SE_GPU_IDS="${SE_GPU_IDS:-0,1,2,3}"
 export SE_N_GPUS SE_GPU_IDS
 
 # =============================================================================
 # Offline Rollout 参数
+# 说明：mult 仅用于 offline 多采样本。offline driver need ≈ (T×mult)×SYNTH_BATCH。
+#   verl 实际 total_training_steps 见下方 synthesizer_training_steps（当前为 基座T+2，非纯 T）。
+#   仍可用旧名 SE_OFFLINE_ROLLOUT_STEPS 作为 mult
 # =============================================================================
-export SE_OFFLINE_ROLLOUT_STEPS="${SE_OFFLINE_ROLLOUT_STEPS:-2}"
-export SE_OFFLINE_ROLLOUT_BATCH_SIZE="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-16}"
+export SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER="${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-1}}"
+export SE_OFFLINE_ROLLOUT_BATCH_SIZE="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-128}"
+# 线下游标仅当 SE_OFFLINE_RESET_STATE=1 时从 0 重置（见 Synthesizer.sh / solver_offline_driver）
+export SE_OFFLINE_RESET_STATE="${SE_OFFLINE_RESET_STATE:-0}"
 export SE_OFFLINE_ROLLOUT_N="${SE_OFFLINE_ROLLOUT_N:-4}"
 export SE_OFFLINE_NUM_RANDOM_Q="${SE_OFFLINE_NUM_RANDOM_Q:-4}"
 export SE_OFFLINE_SKILL_TYPE="${SE_OFFLINE_SKILL_TYPE:-skill_generation_v1}"
 
 # =============================================================================
 # Synthesizer RL 训练超参数
+# 基座 PPO 步数 T = SE_SYNTHESIZER_TRAINING_STEPS（= SE_SYNTHESIZER_TRAINING_STEPS_BASE）；
+# 实际传给 verl 的 total_training_steps = synthesizer_training_steps = T+2（见下），比「只跑 T 步」多 2 步，总
+#  reward/rollout 时间约 ×(T+2)/T。若与别机「20 分钟跑完」对齐，可改为一律用 T 或统一 base+2。
 # =============================================================================
-synthesizer_training_steps="${SE_SYNTHESIZER_TRAINING_STEPS:-20}"
+SE_SYNTHESIZER_TRAINING_STEPS_BASE="${SE_SYNTHESIZER_TRAINING_STEPS:-20}"
+export SE_SYNTHESIZER_TRAINING_STEPS_BASE
+SE_OFFLINE_ROLLOUT_DRIVER_STEPS=$(( SE_SYNTHESIZER_TRAINING_STEPS_BASE * SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER ))
+export SE_OFFLINE_ROLLOUT_DRIVER_STEPS
+synthesizer_training_steps="$((SE_SYNTHESIZER_TRAINING_STEPS_BASE+2))"
 export synthesizer_training_steps
 export SE_SYNTHESIZER_STEPS="${synthesizer_training_steps}"
+export SE_SYNTHESIZER_TRAINING_STEPS="${SE_SYNTHESIZER_TRAINING_STEPS_BASE}"
 
-export SYNTH_BATCH_SIZE="${SYNTH_BATCH_SIZE:-16}"
+export SYNTH_BATCH_SIZE="${SYNTH_BATCH_SIZE:-128}"
 export SYNTH_ROLLOUT_QUERY_NUM="${SYNTH_ROLLOUT_QUERY_NUM:-4}"
+# reward_manager._solver_use_skill 读 SYNTH_ROLLOUT_N（与 actor rollout_n 可分开调）；默认同上
+export SYNTH_ROLLOUT_N="${SYNTH_ROLLOUT_N:-${SYNTH_ROLLOUT_QUERY_NUM}}"
+
+# reward：HTTP 并发。默认可为 (reward_vLLM 进程数)×16，避免 512 满并发在少量 vLLM 上排队反变慢；可设大如 64/128 试吞吐
+_SYNTH_N_ROLLOUT_SERVERS="$((SE_N_GPUS / 2))"
+export SYNTH_SOLVER_ROLLOUT_MAX_WORKERS="${SYNTH_SOLVER_ROLLOUT_MAX_WORKERS:-$(( _SYNTH_N_ROLLOUT_SERVERS * 16 ))}"
+# 单条 /rollout 等待时间（秒），覆盖 reward_manager 默认 2000；调大只缓解「等不及」，不提高吞吐
+export SYNTH_ROLLOUT_REQUEST_TIMEOUT="${SYNTH_ROLLOUT_REQUEST_TIMEOUT:-2000}"
 export SYNTH_QUERY_TOP_P="${SYNTH_QUERY_TOP_P:-0.99}"
 export SYNTH_QUERY_TOP_K="${SYNTH_QUERY_TOP_K:--1}"
 export SYNTH_KL_LOSS_COEF="${SYNTH_KL_LOSS_COEF:-0.01}"
-export SYNTH_QUERY_TEMPERATURE="${SYNTH_QUERY_TEMPERATURE:-1.0}"
+export SYNTH_QUERY_TEMPERATURE="${SYNTH_QUERY_TEMPERATURE:-0.7}"
 export SYNTH_TP="${SYNTH_TP:-1}"
 export SYNTH_MAX_PROMPT_LENGTH="${SYNTH_MAX_PROMPT_LENGTH:-8192}"
-export SYNTH_MAX_RESPONSE_LENGTH="${SYNTH_MAX_RESPONSE_LENGTH:-4096}"
+export SYNTH_MAX_RESPONSE_LENGTH="${SYNTH_MAX_RESPONSE_LENGTH:-512}"
 export SYNTH_GPU_MEM_UTIL="${SYNTH_GPU_MEM_UTIL:-0.60}"
 export SYNTH_RANDOM_Q_COEF="${SYNTH_RANDOM_Q_COEF:-0.5}"
 export SYNTH_USE_SKILL_TYPE="${SYNTH_USE_SKILL_TYPE:-skill_use_v1}"
@@ -97,23 +127,34 @@ export SYNTH_USE_SKILL_TYPE="${SYNTH_USE_SKILL_TYPE:-skill_use_v1}"
 # =============================================================================
 solver_retrain_steps="${SE_SOLVER_RETRAIN_STEPS:-40}"
 export solver_retrain_steps
-solver_batch_size="${SE_SOLVER_BATCH_SIZE:-256}"
+solver_batch_size="${SE_SOLVER_BATCH_SIZE:-128}"
 rollout_n="${SE_SOLVER_ROLLOUT_N:-4}"
+export SE_SOLVER_BATCH_SIZE="${solver_batch_size}"
 export solver_batch_size rollout_n
 
+# memory ingest：同一题多 traj 时只入 reward 最高一条；且 utility(reward) >= 该值才入池（默认 0）
+SE_MEMORY_MIN_UTILITY="${SE_MEMORY_MIN_UTILITY:-0}"
+export SE_MEMORY_MIN_UTILITY
+
 # =============================================================================
-# 评估与 retriever 服务（memory 同步前需 HTTP 检索；与 start_retriever_server 对齐）
+# Syn↔Solver 交替进化：每轮含 Synthesizer → after_sync → Solver → after_solver，共 n 轮得 V1..Vn
 # =============================================================================
-solver_eval_step=15
+skill_evo_num_rounds="${SE_SKILL_EVO_NUM_ROUNDS:-10}"
+export skill_evo_num_rounds
+
+# =============================================================================
+# 训练后基准评测（eval_single_math_data.sh）与 retriever（memory 同步前需 HTTP）
+# =============================================================================
+solver_eval_step=40
 solver_eval_temperature=0.6
-solver_eval_num_iter=15
 
 RETRIEVER_HOST="${RETRIEVER_HOST:-127.0.0.1}"
 RETRIEVER_PORT="${RETRIEVER_PORT:-8766}"
 SE_RETRIEVER_EMBEDDING_MODEL="${SE_RETRIEVER_EMBEDDING_MODEL:-/home/xzs/data/model/Qwen3-Embedding-0.6B}"
 RETRIEVER_CUDA_VISIBLE_DEVICES="${RETRIEVER_CUDA_VISIBLE_DEVICES:-1}"
 RETRIEVER_TENSOR_PARALLEL_SIZE="${RETRIEVER_TENSOR_PARALLEL_SIZE:-1}"
-RETRIEVER_GPU_MEMORY_UTILIZATION="${RETRIEVER_GPU_MEMORY_UTILIZATION:-0.3}"
+# vLLM 要求 free >= utilization*总显存；0.2*79GiB≈15.8GiB 在残留进程时易踩线，0.15 更稳（可 env 覆盖）
+RETRIEVER_GPU_MEMORY_UTILIZATION="${RETRIEVER_GPU_MEMORY_UTILIZATION:-0.15}"
 RETRIEVER_INSTRUCT_TASK="${RETRIEVER_INSTRUCT_TASK:-Given a question, retrieve relevant skills that help answer it}"
 RETRIEVER_IDLE_TIMEOUT="${RETRIEVER_IDLE_TIMEOUT:-300}"
 export RETRIEVER_HOST RETRIEVER_PORT
@@ -128,9 +169,91 @@ export SE_RETRIEVER_URL="http://${RETRIEVER_HOST}:${RETRIEVER_PORT}"
 # start_retriever_server.sh 也读 RETRIEVER_* / SE_RETRIEVER_*
 RETRIEVER_MAX_WAIT_S="${RETRIEVER_MAX_WAIT_S:-300}"
 
+# =============================================================================
+# Resume：从已有 ckpt / memory / merged 训练数据 续跑，跳过已完成阶段
+#   SE_RESUME=1|true|yes 时启用；Synthesizer ckpt global_step_* 与 PPO 总步 = 基座 T 对齐；Solver 以
+#   SE_SOLVER_RETRAIN_STEPS 为准
+#   无 Synthesizer 最终 ckpt 但已有 merged/train_data.(parquet|jsonl) 时：跳过 offline、仅跑 RL（见 se_synth_merged_train_ready）
+#   memory: memory_after_syn_vN.jsonl / memory_after_sol_vN.jsonl（N 为版本号 1,2,…）
+# =============================================================================
+SE_RESUME="${SE_RESUME:-true}"
+export SE_RESUME
+
+se_resume_is_true() {
+    case "${SE_RESUME}" in
+        1|true|TRUE|True|yes|YES|y|Y) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 若已存在则跳过后续 Synthesizer（含 offline + RL）
+se_resume_skip_synth() {
+    local ev="$1"
+    se_resume_is_true || return 1
+    [ -d "${synthesizer_path_dir}/${ev}/ckpts/global_step_${synthesizer_training_steps}/actor/huggingface" ]
+}
+
+# 该轮 Synthesizer 的 offline 已产出合并训练数据（无最终 ckpt 时用于跳过 offline、仅跑 RL）
+se_synth_merged_train_ready() {
+    local ev="$1"
+    [ -f "${synthesizer_path_dir}/${ev}/merged/train_data.parquet" ] \
+        || [ -f "${synthesizer_path_dir}/${ev}/merged/train_data.jsonl" ]
+}
+
+# 若已存在则跳过后续 retriever+after_sync
+se_resume_skip_mem_sync() {
+    local ev="$1"
+    se_resume_is_true || return 1
+    local n="${ev#V}"
+    [ -f "${memory_path_dir}/memory_after_syn_v${n}.jsonl" ]
+}
+
+# 若已存在则跳过后续 Solver 训练
+se_resume_skip_solver() {
+    local ev="$1"
+    se_resume_is_true || return 1
+    [ -d "${solver_path_dir}/${ev}/ckpts/global_step_${solver_retrain_steps}/actor/huggingface" ]
+}
+
+# 若已存在则跳过后续 after_solver
+se_resume_skip_mem_solver() {
+    local ev="$1"
+    se_resume_is_true || return 1
+    local n="${ev#V}"
+    [ -f "${memory_path_dir}/memory_after_sol_v${n}.jsonl" ]
+}
+
+# 新版本 Vk：若本版本目录下尚无游标，从 V(k-1) 继承，使 Synthesizer/Solver 在原始语料上各自继续向前取数（与 data_cursor.txt / train_cursor_state 一致）
+se_inherit_data_cursors_from_prev() {
+    local ev="$1"
+    local prev_iter="$2"
+    if [ "${prev_iter}" -lt 1 ]; then
+        return 0
+    fi
+    local pev="V${prev_iter}"
+    if [ ! -f "${synthesizer_path_dir}/${ev}/train_cursor_state.json" ] && [ -f "${synthesizer_path_dir}/${pev}/train_cursor_state.json" ]; then
+        mkdir -p "${synthesizer_path_dir}/${ev}"
+        cp -a "${synthesizer_path_dir}/${pev}/train_cursor_state.json" "${synthesizer_path_dir}/${ev}/"
+        if [ -f "${synthesizer_path_dir}/${pev}/data_cursor.txt" ]; then
+            cp -a "${synthesizer_path_dir}/${pev}/data_cursor.txt" "${synthesizer_path_dir}/${ev}/"
+        fi
+        echo "[cursor] 已从 ${pev} 继承 Synthesizer 游标至 ${ev}（train_cursor_state.json + data_cursor.txt）"
+    fi
+    if [ ! -f "${solver_path_dir}/${ev}/data_cursor.txt" ] && [ -f "${solver_path_dir}/${pev}/data_cursor.txt" ]; then
+        mkdir -p "${solver_path_dir}/${ev}"
+        cp -a "${solver_path_dir}/${pev}/data_cursor.txt" "${solver_path_dir}/${ev}/"
+        echo "[cursor] 已从 ${pev} 继承 Solver data_cursor.txt 至 ${ev}"
+    fi
+}
+
 # memory_func_after_sync：等待检索服务 /health
 retriever_memory_sync_after_synth() {
     local ev="$1"
+    echo "retriever 启动前：再次 pkill python（Synthesizer 的 EXIT 已清过一轮；此处防残留）..."
+    pkill python 2> /dev/null || true
+    sleep 4
+    pkill python 2> /dev/null || true
+    sleep 8
     echo "启动 retriever 服务 (memory 同步用)..."
     bash "${SCRIPT_DIR}/start_retriever_server.sh" &
     local _wait=0
@@ -160,78 +283,151 @@ retriever_memory_sync_after_synth() {
 function now() {
     date '+%Y-%m-%d-%H-%M'
 }
+
+# 将本脚本解析后的关键变量 + 当前全部已 export 的环境写入实验目录，便于复现实验
+main_o_write_experiment_config() {
+    local cfg="${saved_results_dir}/experiment_config.txt"
+    local tmp="${cfg}.$$.tmp"
+    {
+        printf '%s\n' \
+            '# skill_evo main_o — experiment_config.txt' \
+            "# iso_time=$(date -Iseconds 2>/dev/null || date)" \
+            "# host=$(hostname 2>/dev/null || echo unknown) user=$(id -un 2>/dev/null || echo unknown)" \
+            "# cwd_at_launch=$(pwd)" \
+            "# main_o=${SCRIPT_DIR}/main_o.sh" \
+            ''
+        printf '%s\n' '# ========== paths & identity =========='
+        local __k
+        for __k in dir SE_BASE_DIR SE_MODEL_DIR SE_DATA_DIR model_dir data_dir \
+            base_model_name base_model_path data_name data_file \
+            project_name exp_name variant WORKING_DIR \
+            saved_results_dir SE_SAVED_RESULTS_DIR SE_SKILL_SAVED_ROOT \
+            synthesizer_path_dir SYNTHESIZER_PATH_DIR SE_Synthsizer_DIR \
+            solver_path_dir SOLVER_PATH_DIR SE_SOLVER_DIR \
+            memory_path_dir MEMORY_PATH_DIR \
+            log_path_dir LOG_PATH_DIR tensorboard_dir TENSORBOARD_PATH \
+            SE_DATA_FILE SE_CODE_MODULE; do
+            [[ -v $__k ]] && printf '%s=%q\n' "$__k" "${!__k}"
+        done
+        printf '\n%s\n' '# ========== GPUs & offline rollout =========='
+        for __k in SE_N_GPUS SE_GPU_IDS \
+            SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER SE_OFFLINE_ROLLOUT_BATCH_SIZE \
+            SE_OFFLINE_RESET_STATE SE_OFFLINE_ROLLOUT_N SE_OFFLINE_NUM_RANDOM_Q SE_OFFLINE_SKILL_TYPE; do
+            [[ -v $__k ]] && printf '%s=%q\n' "$__k" "${!__k}"
+        done
+        printf '\n%s\n' '# ========== Synthesizer =========='
+        for __k in SE_SYNTHESIZER_TRAINING_STEPS_BASE SE_OFFLINE_ROLLOUT_DRIVER_STEPS \
+            synthesizer_training_steps SE_SYNTHESIZER_STEPS SE_SYNTHESIZER_TRAINING_STEPS \
+            SYNTH_BATCH_SIZE SYNTH_ROLLOUT_QUERY_NUM SYNTH_QUERY_TOP_P SYNTH_QUERY_TOP_K \
+            SYNTH_KL_LOSS_COEF SYNTH_QUERY_TEMPERATURE SYNTH_TP \
+            SYNTH_MAX_PROMPT_LENGTH SYNTH_MAX_RESPONSE_LENGTH SYNTH_GPU_MEM_UTIL \
+            SYNTH_RANDOM_Q_COEF SYNTH_USE_SKILL_TYPE; do
+            [[ -v $__k ]] && printf '%s=%q\n' "$__k" "${!__k}"
+        done
+        printf '\n%s\n' '# ========== Solver & evolution =========='
+        for __k in solver_retrain_steps SE_SOLVER_RETRAIN_STEPS solver_batch_size SE_SOLVER_BATCH_SIZE \
+            rollout_n SE_SOLVER_ROLLOUT_N SE_MEMORY_MIN_UTILITY skill_evo_num_rounds SE_SKILL_EVO_NUM_ROUNDS \
+            solver_eval_step solver_eval_temperature; do
+            [[ -v $__k ]] && printf '%s=%q\n' "$__k" "${!__k}"
+        done
+        printf '\n%s\n' '# ========== retriever & resume =========='
+        for __k in RETRIEVER_HOST RETRIEVER_PORT SE_RETRIEVER_URL SE_RETRIEVER_EMBEDDING_MODEL \
+            RETRIEVER_CUDA_VISIBLE_DEVICES RETRIEVER_TENSOR_PARALLEL_SIZE \
+            RETRIEVER_GPU_MEMORY_UTILIZATION RETRIEVER_INSTRUCT_TASK RETRIEVER_IDLE_TIMEOUT \
+            RETRIEVER_MAX_WAIT_S SE_RESUME VLLM_WORKER_MULTIPROC_METHOD SE_RAY_TEMP_ROOT; do
+            [[ -v $__k ]] && printf '%s=%q\n' "$__k" "${!__k}"
+        done
+        printf '\n%s\n' '# ========== shell options (set +o) =========='
+        set +o
+        printf '\n%s\n' '# ========== export -p (sorted, full snapshot) =========='
+        export -p | LC_ALL=C sort
+    } > "${tmp}" && mv -f "${tmp}" "${cfg}"
+}
+
+main_o_write_experiment_config
 exec > >(tee -a "${log_path_dir}/main_${variant}-$(now).log") 2>&1
 
 cd ${WORKING_DIR}
-echo "开始第一轮训练..."
-echo "训练 Synthesizer..."
-bash ${SCRIPT_DIR}/Synthesizer.sh ${initial_version} ${base_model_path} ${base_model_path} ${synthesizer_training_steps} ${data_file} || {
-    echo "Error: 第一轮 Synthesizer 训练失败"
-    exit 1
-}
+echo "实验参数已写入: ${saved_results_dir}/experiment_config.txt"
+echo "========== 训练调度: 共 ${skill_evo_num_rounds} 轮 Syn↔Solver 进化 (V1..V${skill_evo_num_rounds}) =========="
+if se_resume_is_true; then
+    echo "[resume] SE_RESUME=true：已有 ckpt/Memory 的环节会跳过；无 Synthesizer 最终 ckpt 但已有 merged/train_data 时只跳过 offline；verl 仍可用 resume_mode=auto 续步"
+else
+    echo "（非 resume 全流程跑；Synthesizer 内 resume_mode=auto 时亦会从 ckpt 续训；此时不会因 merged 而跳过 offline）"
+fi
 
-retriever_memory_sync_after_synth "${initial_version}" || {
-    echo "Error: 第一轮 memory_func_after_sync 失败"
-    exit 1
-}
+for iter in $(seq 1 "${skill_evo_num_rounds}"); do
+    exp_version="V${iter}"
+    echo ""
+    echo "########## 版本 ${exp_version} / V${skill_evo_num_rounds} ##########"
 
-echo "训练 Solver..."
-bash ${SCRIPT_DIR}/solver.sh ${initial_version} ${base_model_path} ${solver_retrain_steps} || {
-    echo " Error: 第一轮 Solver 训练失败"
-    exit 1
-}
+    se_inherit_data_cursors_from_prev "${exp_version}" $((iter - 1))
 
-echo "按 Solver reward 更新 skill utility（after Solver）..."
-bash ${SCRIPT_DIR}/memory_func_after_solver.sh "${initial_version}" || {
-    echo "Error: 第一轮 memory_func_after_solver 失败"
-    exit 1
-}
+    if [ "${iter}" -eq 1 ]; then
+        prev_synthesizer_model_path="${base_model_path}"
+        prev_solver_model_path="${base_model_path}"
+    else
+        prev_synthesizer_model_path="${synthesizer_path_dir}/V$((iter - 1))/ckpts/global_step_${synthesizer_training_steps}/actor/huggingface"
+        prev_solver_model_path="${solver_path_dir}/V$((iter - 1))/ckpts/global_step_${solver_retrain_steps}/actor/huggingface"
+    fi
 
-for iter in $(seq 2 ${solver_eval_num_iter}); do
-    prev=$((iter-1))
-    prev_exp_version=V${prev}
-    exp_version=V${iter}
+    if se_resume_skip_synth "${exp_version}"; then
+        echo "[resume] 跳过 Synthesizer ${exp_version}（已有 .../ckpts/global_step_${synthesizer_training_steps}/actor/huggingface）"
+    elif se_resume_is_true && se_synth_merged_train_ready "${exp_version}"; then
+        echo "[resume] Synthesizer ${exp_version}：已有 merged 训练数据，跳过 offline、仅跑 reward+RL（SE_SYNTH_SKIP_OFFLINE=1）"
+        SE_SYNTH_SKIP_OFFLINE=1 bash "${SCRIPT_DIR}/Synthesizer.sh" \
+            "${exp_version}" "${prev_synthesizer_model_path}" \
+            "${prev_solver_model_path}" "${synthesizer_training_steps}" "${data_file}" || {
+            echo "Error: Synthesizer ${exp_version} 训练失败" >&2
+            exit 1
+        }
+    else
+        echo "训练 Synthesizer (${exp_name} ${exp_version})..."
+        bash "${SCRIPT_DIR}/Synthesizer.sh" \
+            "${exp_version}" "${prev_synthesizer_model_path}" \
+            "${prev_solver_model_path}" "${synthesizer_training_steps}" "${data_file}" || {
+            echo "Error: Synthesizer ${exp_version} 训练失败" >&2
+            exit 1
+        }
+    fi
 
-    prev_synthesizer_model_path=${synthesizer_path_dir}/${prev_exp_version}/ckpts/global_step_${synthesizer_training_steps}/actor/huggingface
-    cur_synthesizer_model_path=${synthesizer_path_dir}/${exp_version}/ckpts/global_step_${synthesizer_training_steps}/actor/huggingface
-    prev_solver_model_path=${solver_path_dir}/${prev_exp_version}/ckpts/global_step_${solver_retrain_steps}/actor/huggingface
-    cur_solver_model_path=${solver_path_dir}/${exp_version}/ckpts/global_step_${solver_retrain_steps}/actor/huggingface
+    if se_resume_skip_mem_sync "${exp_version}"; then
+        echo "[resume] 跳过 retriever + memory after_sync ${exp_version}（已有 memory_after_syn_v${iter}.jsonl）"
+    else
+        retriever_memory_sync_after_synth "${exp_version}" || {
+            echo "Error: memory_func_after_sync ${exp_version} 失败" >&2
+            exit 1
+        }
+    fi
 
-    echo "开始第 ${iter} 轮训练..."
-    echo "训练 Challenger (${exp_name})..."
-    bash ${SCRIPT_DIR}/Synthesizer.sh \
-        ${exp_version} ${prev_synthesizer_model_path} \
-        ${prev_solver_model_path} ${synthesizer_training_steps} ${data_file} || {
-        echo "Error: 第 ${iter} 轮 Challenger 训练失败"
-        exit 1
-    }
+    if se_resume_skip_solver "${exp_version}"; then
+        echo "[resume] 跳过 Solver ${exp_version}（已有 .../ckpts/global_step_${solver_retrain_steps}/actor/huggingface）"
+    else
+        echo "训练 Solver (${exp_name} ${exp_version})..."
+        bash "${SCRIPT_DIR}/solver.sh" "${exp_version}" "${prev_solver_model_path}" "${solver_retrain_steps}" || {
+            echo "Error: Solver ${exp_version} 训练失败" >&2
+            exit 1
+        }
+    fi
 
-    retriever_memory_sync_after_synth "${exp_version}" || {
-        echo "Error: 第 ${iter} 轮 memory_func_after_sync 失败"
-        exit 1
-    }
+    if se_resume_skip_mem_solver "${exp_version}"; then
+        echo "[resume] 跳过 memory after_solver ${exp_version}（已有 memory_after_sol_v${iter}.jsonl）"
+    else
+        echo "按 Solver reward 更新 skill utility（${exp_version}）..."
+        bash "${SCRIPT_DIR}/memory_func_after_solver.sh" "${exp_version}" || {
+            echo "Error: memory_func_after_solver ${exp_version} 失败" >&2
+            exit 1
+        }
+    fi
 
-    echo "训练 Solver (${exp_name})..."
-    bash ${SCRIPT_DIR}/solver.sh \
-        ${exp_version} ${prev_solver_model_path} ${solver_retrain_steps} || {
-        echo "Error: 第 ${iter} 轮 Solver 训练失败"
-        exit 1
-    }
-
-    echo "按 reward 更新 skill utility（${exp_version}）..."
-    bash ${SCRIPT_DIR}/memory_func_after_solver.sh "${exp_version}" || {
-        echo "Error: 第 ${iter} 轮 memory_func_after_solver 失败"
-        exit 1
-    }
-
-    echo "第 ${iter} 轮训练完成"
+    echo "版本 ${exp_version} 本阶段完成"
 done
 
 echo "所有训练完成！"
-echo "开始评估..."
-dataset="${SE_EVAL_DATASET:-AIME24}"
-eval_script="${SE_EVAL_SCRIPT:-${WORKING_DIR}/evaluation/eval_single_math_data.sh}"
-bash "$eval_script" "${variant}"  "${solver_eval_step}" "${solver_eval_num_iter}" "${base_model_name}" "${dataset}" || {
-    echo "Error: 评估失败"
-    exit 1
-}
+# echo "开始评估..."
+# dataset="${SE_EVAL_DATASET:-AIME24}"
+# eval_script="${SE_EVAL_SCRIPT:-${WORKING_DIR}/evaluation/eval_single_math_data.sh}"
+# bash "$eval_script" "${variant}"  "${solver_eval_step}" "${skill_evo_num_rounds}" "${base_model_name}" "${dataset}" || {
+#     echo "Error: 评估失败"
+#     exit 1
+# }

@@ -27,7 +27,12 @@ import numpy as np
 
 
 def _retryable_solver_rollout_http_error(e: BaseException) -> bool:
-    """超时或短暂网络错误时可重试；HTTP 业务错误（``RuntimeError`` 等）不重试。"""
+    """超时或短暂网络/网关错误时可重试；4xx 等业务错误不重试。
+
+    注意：``solver_offline_driver.post_rollout`` 将 ``HTTPError`` 包成
+    ``RuntimeError("HTTP <code> ...")``，故 socket 读超时等可重试，但
+    502/503/504/500 等若不单独识别则**不会**走重试。
+    """
     if isinstance(e, (TimeoutError, socket.timeout)):
         return True
     if isinstance(e, urllib.error.URLError):
@@ -37,6 +42,13 @@ def _retryable_solver_rollout_http_error(e: BaseException) -> bool:
         return True
     if isinstance(e, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
         return True
+    if isinstance(e, RuntimeError):
+        s = str(e)
+        if "timed out" in s.lower() or "timeout" in s.lower():
+            return True
+        for code in (" 500 ", " 502 ", " 503 ", " 504 "):
+            if code in s:
+                return True
     return False
 
 
@@ -266,7 +278,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
         reward_fn_key='synthesizer',
         storage_path:str="",
         rollout_server_urls: Optional[List[str]] = None,
-        rollout_request_timeout: float = 600.0,
+        rollout_request_timeout: float = 600,
         rollout_http_max_attempts: int = 3,
         use_skill_type: str = "skill_use_v1",
         random_q_coef: float = 0.5,
@@ -495,7 +507,27 @@ class SynthsizerRewardManager(AbstractRewardManager):
             if item["skill_info"]["is_format"]
         ]
         if eligible:
-            max_workers = min(len(eligible), self.solver_rollout_max_workers)
+            n_req = len(eligible)
+            total_data_records = 0
+            for _, item in eligible:
+                rand = item.get("random_q_info") or {}
+                qs = rand.get("questions")
+                # parquet/arrow 可能给 numpy 数组，勿用 (qs or []) 以免对 ndarray 做布尔判断
+                if qs is None:
+                    nq = 0
+                else:
+                    nq = int(np.asarray(qs).size)
+                total_data_records += 1 + nq
+            max_workers = min(n_req, self.solver_rollout_max_workers)
+            # 必须在任何 post_rollout / ThreadPool 任务启动之前打印，并 flush，否则在 Ray/重定向
+            # 非 TTY 时块缓冲，会显得像「算完 reward 才出日志」
+            print(
+                f"[_solver_use_skill] step={step} 即将向 rollout server 发送 HTTP（此时尚未 post /rollout）: "
+                f"请求数={n_req}，data_records 合计条数={total_data_records}，"
+                f"ThreadPool max_workers={max_workers}（solver_rollout_max_workers="
+                f"{self.solver_rollout_max_workers}，server 数={len(urls)}）",
+                flush=True,
+            )
             futs: Dict = {}
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 for job_idx, (i, item) in enumerate(eligible):
@@ -872,10 +904,11 @@ class SolverRewardManager(AbstractRewardManager):
                 }
             )
             
- 
-        
+        # 按 prompt 聚合的 reward_infos；写入 non_tensor_batch 时必须与 batch 行数（每 trajectory 一行）对齐，
+        # 否则 verl DataProto.reorder / _balance_batch 会用 attention_mask 行数索引而越界。
+        uid_to_reward_info = {ri["uid"]: ri for ri in reward_infos}
+        reward_extra_info["reward_infos"] = [uid_to_reward_info[uids[i]] for i in range(len(data))]
 
-        reward_extra_info['reward_infos'] = reward_infos
         reward_info_path_dir = f"{self.storage_path}/reward_info/"
         step_str = str(step).zfill(3)
         if self.num_examine > 0:

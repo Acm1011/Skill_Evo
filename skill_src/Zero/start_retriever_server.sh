@@ -7,9 +7,14 @@ PORT="${RETRIEVER_PORT:-8766}"
 EMBEDDING_MODEL="${SE_RETRIEVER_EMBEDDING_MODEL:-/home/xzs/data/model/Qwen3-Embedding-0.6B}"
 CUDA_VISIBLE_DEVICES="${RETRIEVER_CUDA_VISIBLE_DEVICES:-1}"
 TENSOR_PARALLEL_SIZE="${RETRIEVER_TENSOR_PARALLEL_SIZE:-1}"
-GPU_MEMORY_UTILIZATION="${RETRIEVER_GPU_MEMORY_UTILIZATION:-0.3}"
+GPU_MEMORY_UTILIZATION="${RETRIEVER_GPU_MEMORY_UTILIZATION:-0.15}"
 INSTRUCT_TASK="${RETRIEVER_INSTRUCT_TASK:-Given a question, retrieve relevant skills that help answer it}"
 IDLE_TIMEOUT="${RETRIEVER_IDLE_TIMEOUT:-300}"
+# 与 plan 一致：Memory 下不区分实验版本，统一 doc 嵌入落盘目录（可被 SE_RETRIEVER_DOC_CACHE_DIR 覆盖）
+: "${RETRIEVER_DOC_CACHE_DIR:=${SE_RETRIEVER_DOC_CACHE_DIR:-}}"
+if [ -z "${RETRIEVER_DOC_CACHE_DIR}" ] && [ -n "${MEMORY_PATH_DIR:-}" ]; then
+  RETRIEVER_DOC_CACHE_DIR="${MEMORY_PATH_DIR}/doc_embed_cache"
+fi
 
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -27,9 +32,16 @@ CMD=(
     --instruct-task "${INSTRUCT_TASK}"
     --idle-timeout "${IDLE_TIMEOUT}"
 )
+if [ -n "${RETRIEVER_DOC_CACHE_DIR}" ]; then
+  CMD+=(--doc-cache-dir "${RETRIEVER_DOC_CACHE_DIR}")
+  export SE_RETRIEVER_DOC_CACHE_DIR="${RETRIEVER_DOC_CACHE_DIR}"
+fi
 
 echo "[start_retriever_server] $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[start_retriever_server] cmd: ${CMD[*]}"
+if [ -n "${RETRIEVER_DOC_CACHE_DIR:-}" ]; then
+  echo "[start_retriever_server] doc_embed_cache: ${RETRIEVER_DOC_CACHE_DIR}"
+fi
 
 export CUDA_DEVICE_ORDER="PCI_BUS_ID"
 

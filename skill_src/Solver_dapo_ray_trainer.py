@@ -53,6 +53,9 @@ class SolverDAPOTrainer(RayPPOTrainer):
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
     def _validate(self):
+        print(f"validate start! step: {self.global_steps}")
+        # print(f"self.val_dataloader: {self.val_dataloader}")
+
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -275,6 +278,7 @@ class SolverDAPOTrainer(RayPPOTrainer):
         num_gen_batches = 0
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+                print(f"train start! step: {self.global_steps}")
                 metrics = {}
 
                 with marked_timer("start_profile", timing_raw):
@@ -306,6 +310,7 @@ class SolverDAPOTrainer(RayPPOTrainer):
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
+                        print(f"gen start! step: {self.global_steps}")
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)

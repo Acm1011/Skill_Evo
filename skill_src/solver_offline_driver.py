@@ -45,6 +45,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import pandas as pd
 
+from skill_src.skill_manager.data_cursor_io import DATA_CURSOR_FILENAME, write_data_cursor
+
 
 def _http_json_sanitize(obj: Any) -> Any:
     """
@@ -1208,6 +1210,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     state.cursor = final_cursor
     save_state(state_path_resolved, state)
+    write_data_cursor(Path(work_dir) / DATA_CURSOR_FILENAME, state.cursor)
     remaining = total_n - state.cursor
     print(
         f"[driver] 本轮共 rollout 原始样本 {rolled_total} 条，输出有效 {len(merged)} 条；"

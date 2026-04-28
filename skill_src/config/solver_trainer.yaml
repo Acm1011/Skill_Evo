@@ -14,9 +14,7 @@ data:
 reward_model:
   reward_manager: solver
   reward_kwargs:
-    storage_path: /root/users/ycy/Self-evolving-Agent/saved_results/solver
-    filter_lower: 0.0
-    filter_high: 1.0
+    storage_path: null
     
 
 algorithm:

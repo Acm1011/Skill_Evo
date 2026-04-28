@@ -12,6 +12,7 @@ solver_training_steps="$3"
 
 
 training_step=$((${solver_training_steps} + 5))
+# training_step=${solver_training_steps}
 # 从环境变量获取路径配置，如果未设置则使用默认值
 storage_path=${SOLVER_PATH_DIR}/${exp_version}
 CKPTS_DIR=${storage_path}/ckpts/
@@ -37,10 +38,7 @@ export SE_SOLVER_GPUS="${SOLVER_GPUS}"
 export SE_N_SOLVER_GPUS="${N_SOLVER_GPUS}"
 export SE_GEN_QUERY_GPUS="${GEN_QUERY_GPUS}"
 
-# 数据生成和准备 python
 
-echo "数据生成完成"
-sleep 10
 adv_estimator=grpo
 
 # DAPO related parameters
@@ -60,16 +58,29 @@ filter_lower=0.25
 filter_high=0.75
 
 max_num_gen_batches=10 # 10 个 batch 的数据fileter以后，还没有凑够1个batch
-train_prompt_bsz=${solver_batch_size}
+solver_batch_size="${solver_batch_size:-16}"
 val_batch_size=512 # 验证集 batch size
-gen_prompt_bsz=$((train_prompt_bsz * 3))
-n_resp_per_prompt=${rollout_n}
-train_prompt_mini_bsz=$((train_prompt_bsz / 2))
 
-# Paths
-# TODO: 训练数据准备， 测试数据准备
+# Paths（须早于 gen_batch 计算：verl train DataLoader 为 drop_last=True 且 batch_size=data.gen_batch_size）
 TRAIN_FILE=${storage_path}/train_data.parquet
 TEST_FILE=${storage_path}/test_data.parquet
+
+# 默认 gen_batch = train_batch * 3；若大于 train parquet 行数则 0 个 batch（AssertionError）
+_gen_mul="${SE_GEN_PROMPT_BATCH_MULTIPLIER:-3}"
+gen_prompt_bsz=$((solver_batch_size * _gen_mul))
+if [ -f "${TRAIN_FILE}" ]; then
+  _train_n=$(python3 -c "import pyarrow.parquet as pq, sys; print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" "${TRAIN_FILE}" 2>/dev/null \
+    || python3 -c "import pandas as pd, sys; print(len(pd.read_parquet(sys.argv[1])))" "${TRAIN_FILE}" 2>/dev/null || true)
+  if [ -n "${_train_n:-}" ] && [ "${_train_n}" -ge 1 ] 2>/dev/null; then
+    if [ "${gen_prompt_bsz}" -gt "${_train_n}" ]; then
+      echo "[solver.sh] data.gen_batch_size 原=${gen_prompt_bsz} > train_data 行数=${_train_n}，钳制为 ${_train_n}（否则 verl drop_last 后 train dataloader 为空）" >&2
+      gen_prompt_bsz="${_train_n}"
+    fi
+  fi
+fi
+
+n_resp_per_prompt=${rollout_n}
+train_prompt_mini_bsz=$((solver_batch_size / 2))
 
 # Algorithm
 temperature=1.0
@@ -102,6 +113,7 @@ TRAINING_PID=""
 
 # 使用环境变量指定的代码模块
 CODE_MODULE="${SE_CODE_MODULE:-se_code_auto}"
+echo "CODE_MODULE: ${CODE_MODULE}"
 
 cd ${WORKING_DIR}
 # 启动训练进程并记录PID
@@ -115,7 +127,7 @@ CUDA_VISIBLE_DEVICES=${SOLVER_GPUS} python3 -m ${CODE_MODULE}.main_solver_dapo \
     data.max_response_length=${max_response_length} \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.return_raw_chat=True \
-    data.train_batch_size=${train_prompt_bsz} \
+    data.train_batch_size=${solver_batch_size} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
@@ -167,17 +179,15 @@ CUDA_VISIBLE_DEVICES=${SOLVER_GPUS} python3 -m ${CODE_MODULE}.main_solver_dapo \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
     reward_model.reward_manager=solver \
     reward_model.reward_kwargs.storage_path=${storage_path} \
-    reward_model.reward_kwargs.filter_lower=${filter_lower} \
-    reward_model.reward_kwargs.filter_high=${filter_high} \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="Solver-${exp_name}" \
     trainer.n_gpus_per_node=${N_SOLVER_GPUS} \
     trainer.nnodes=1 \
     trainer.total_training_steps=${training_step} \
-    trainer.val_before_train=True \
-    trainer.test_freq=10 \
-    trainer.save_freq=20 \
+    trainer.val_before_train=False \
+    trainer.test_freq=-1 \
+    trainer.save_freq=10 \
     trainer.total_epochs=15 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto &
