@@ -103,14 +103,6 @@ export SE_SYNTHESIZER_TRAINING_STEPS="${SE_SYNTHESIZER_TRAINING_STEPS_BASE}"
 
 export SYNTH_BATCH_SIZE="${SYNTH_BATCH_SIZE:-128}"
 export SYNTH_ROLLOUT_QUERY_NUM="${SYNTH_ROLLOUT_QUERY_NUM:-4}"
-# reward_manager._solver_use_skill 读 SYNTH_ROLLOUT_N（与 actor rollout_n 可分开调）；默认同上
-export SYNTH_ROLLOUT_N="${SYNTH_ROLLOUT_N:-${SYNTH_ROLLOUT_QUERY_NUM}}"
-
-# reward：HTTP 并发。默认可为 (reward_vLLM 进程数)×16，避免 512 满并发在少量 vLLM 上排队反变慢；可设大如 64/128 试吞吐
-_SYNTH_N_ROLLOUT_SERVERS="$((SE_N_GPUS / 2))"
-export SYNTH_SOLVER_ROLLOUT_MAX_WORKERS="${SYNTH_SOLVER_ROLLOUT_MAX_WORKERS:-$(( _SYNTH_N_ROLLOUT_SERVERS * 16 ))}"
-# 单条 /rollout 等待时间（秒），覆盖 reward_manager 默认 2000；调大只缓解「等不及」，不提高吞吐
-export SYNTH_ROLLOUT_REQUEST_TIMEOUT="${SYNTH_ROLLOUT_REQUEST_TIMEOUT:-2000}"
 export SYNTH_QUERY_TOP_P="${SYNTH_QUERY_TOP_P:-0.99}"
 export SYNTH_QUERY_TOP_K="${SYNTH_QUERY_TOP_K:--1}"
 export SYNTH_KL_LOSS_COEF="${SYNTH_KL_LOSS_COEF:-0.01}"
@@ -121,6 +113,7 @@ export SYNTH_MAX_RESPONSE_LENGTH="${SYNTH_MAX_RESPONSE_LENGTH:-512}"
 export SYNTH_GPU_MEM_UTIL="${SYNTH_GPU_MEM_UTIL:-0.60}"
 export SYNTH_RANDOM_Q_COEF="${SYNTH_RANDOM_Q_COEF:-0.5}"
 export SYNTH_USE_SKILL_TYPE="${SYNTH_USE_SKILL_TYPE:-skill_use_v1}"
+export SYNTH_SOLVER_ROLLOUT_MAX_WORKERS="${SYNTH_SOLVER_ROLLOUT_MAX_WORKERS:-512}"
 
 # =============================================================================
 # Solver 训练超参数（供 solver.sh 子进程；tensorboard 路径与 exp 名）

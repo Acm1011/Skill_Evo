@@ -290,6 +290,12 @@ class SynthsizerRewardManager(AbstractRewardManager):
         self.storage_path = storage_path
         self.rollout_server_urls = rollout_server_urls
         self.rollout_request_timeout = rollout_request_timeout
+        _rt = os.environ.get("SYNTH_ROLLOUT_REQUEST_TIMEOUT", "").strip()
+        if _rt:
+            try:
+                self.rollout_request_timeout = max(1.0, float(_rt))
+            except ValueError:
+                pass
         self.use_skill_type = use_skill_type
         self.random_q_coef = random_q_coef
         _a = os.environ.get("SYNTH_ROLLOUT_HTTP_MAX_ATTEMPTS", "").strip()
