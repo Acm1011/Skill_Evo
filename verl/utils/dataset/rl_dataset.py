@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import copy
+import json
 import logging
 import os
 import re
@@ -121,6 +122,55 @@ class RLHFDataset(Dataset):
         self._download()
         self._read_files_and_tokenize()
 
+    def _maybe_decode_parquet_json_columns(self, dataframe: datasets.Dataset) -> datasets.Dataset:
+        """``prepare_solver_skills`` 等可能将 ``prompt`` / ``extra_info`` 及嵌套列存为 JSON 文本列（读回时还原）。"""
+
+        pk = self.prompt_key
+
+        def decode_row(ex: dict) -> dict:
+            row = dict(ex)
+            v = row.get(pk)
+            if isinstance(v, str):
+                try:
+                    row[pk] = json.loads(v)
+                except json.JSONDecodeError:
+                    pass
+            ei = row.get("extra_info")
+            if isinstance(ei, str):
+                try:
+                    row["extra_info"] = json.loads(ei) if ei.strip() else {}
+                except json.JSONDecodeError:
+                    row["extra_info"] = {}
+            elif ei is None:
+                row["extra_info"] = {}
+            for kk, vv in list(row.items()):
+                if kk in (pk, "extra_info"):
+                    continue
+                if isinstance(vv, str) and vv.strip() and vv.strip()[0] in "[{":
+                    try:
+                        parsed = json.loads(vv)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(parsed, tuple):
+                        row[kk] = list(parsed)
+                    elif isinstance(parsed, (list, dict)):
+                        row[kk] = parsed
+            return row
+
+        return dataframe.map(decode_row, desc="decode parquet JSON columns")
+
+    @staticmethod
+    def _load_parquet_via_record_batches_to_pylist(parquet_file: str) -> datasets.Dataset:
+        """绕过 PyArrow parquet 整块 ``to_table`` 在嵌套 chunked 数组上的已知错误。"""
+        import pyarrow.parquet as pq
+
+        path = parquet_file if isinstance(parquet_file, str) else str(parquet_file)
+        rows = []
+        pf = pq.ParquetFile(path)
+        for batch in pf.iter_batches(batch_size=1024):
+            rows.extend(batch.to_pylist())
+        return datasets.Dataset.from_list(rows)
+
     def _download(self, use_origin_parquet=False):
         from verl.utils.fs import copy_to_local
 
@@ -131,8 +181,29 @@ class RLHFDataset(Dataset):
     def _read_files_and_tokenize(self):
         dataframes = []
         for parquet_file in self.data_files:
-            # read parquet files and cache
-            dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+            try:
+                dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+            except Exception as e0:
+                logger.warning(
+                    "HF datasets parquet reader failed for %s (%s: %s); trying pandas.read_parquet",
+                    parquet_file,
+                    type(e0).__name__,
+                    e0,
+                )
+                try:
+                    import pandas as pd
+
+                    pdf = pd.read_parquet(parquet_file)
+                    dataframe = datasets.Dataset.from_pandas(pdf, preserve_index=False)
+                except Exception as e1:
+                    logger.warning(
+                        "pandas.read_parquet failed for %s (%s: %s); trying pyarrow.RecordBatch.to_pylist",
+                        parquet_file,
+                        type(e1).__name__,
+                        e1,
+                    )
+                    dataframe = RLHFDataset._load_parquet_via_record_batches_to_pylist(parquet_file)
+            dataframe = self._maybe_decode_parquet_json_columns(dataframe)
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 

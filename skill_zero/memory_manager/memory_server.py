@@ -422,8 +422,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--retriever-timeout",
         type=float,
-        default=30.0,
-        help="调用 retriever_server 的超时秒数（默认 30s）",
+        default=300.0,
+        help="调用 retriever_server 的超时秒数（默认 300；SkillManager 亦支持环境变量 SE_RETRIEVER_TIMEOUT）",
     )
     p.add_argument(
         "--skills-jsonl",

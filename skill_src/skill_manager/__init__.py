@@ -30,7 +30,11 @@ from .skill_memory import (
     SkillMemoryDuplicateIdError,
     SkillMemoryFullError,
 )
-from .skill_controller import SkillController, synth_reward_info_jsonl_path
+from .skill_controller import (
+    SkillController,
+    synth_reward_info_jsonl_path,
+    synth_reward_info_jsonl_paths,
+)
 
 __all__ = [
     "DEFAULT_RETRIEVER_URL",
@@ -56,4 +60,5 @@ __all__ = [
     "parse_is_success",
     "SkillController",
     "synth_reward_info_jsonl_path",
+    "synth_reward_info_jsonl_paths",
 ]

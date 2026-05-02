@@ -10,8 +10,14 @@ TENSOR_PARALLEL_SIZE="${RETRIEVER_TENSOR_PARALLEL_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${RETRIEVER_GPU_MEMORY_UTILIZATION:-0.15}"
 INSTRUCT_TASK="${RETRIEVER_INSTRUCT_TASK:-Given a question, retrieve relevant skills that help answer it}"
 IDLE_TIMEOUT="${RETRIEVER_IDLE_TIMEOUT:-300}"
-# 与 plan 一致：Memory 下不区分实验版本，统一 doc 嵌入落盘目录（可被 SE_RETRIEVER_DOC_CACHE_DIR 覆盖）
+# doc 向量缓存目录（emb_*.npy）；优先级：
+#   RETRIEVER_DOC_CACHE_DIR / SE_RETRIEVER_DOC_CACHE_DIR >
+#   DOC_EMBED_CACHE_DIR（可直接指向 .../Memory/doc_embed_cache）>
+#   MEMORY_PATH_DIR/doc_embed_cache
 : "${RETRIEVER_DOC_CACHE_DIR:=${SE_RETRIEVER_DOC_CACHE_DIR:-}}"
+if [ -z "${RETRIEVER_DOC_CACHE_DIR}" ] && [ -n "${DOC_EMBED_CACHE_DIR:-}" ]; then
+  RETRIEVER_DOC_CACHE_DIR="${DOC_EMBED_CACHE_DIR}"
+fi
 if [ -z "${RETRIEVER_DOC_CACHE_DIR}" ] && [ -n "${MEMORY_PATH_DIR:-}" ]; then
   RETRIEVER_DOC_CACHE_DIR="${MEMORY_PATH_DIR}/doc_embed_cache"
 fi

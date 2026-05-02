@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,21 @@ from .skill_memory import SkillMemory
 
 DEFAULT_SKILLS_JSONL = Path("runs/skills_memory.jsonl")
 DEFAULT_RETRIEVER_URL = "http://127.0.0.1:8766"
+# 调用独立 retriever_server 的 HTTP 超时（秒）；prepare_solver_skills 等会逐条 rank，易超过 30s
+_DEFAULT_RETRIEVER_TIMEOUT = 300.0
+
+
+def _resolve_retriever_timeout(explicit: float | None) -> float:
+    """未显式传入时读 ``SE_RETRIEVER_TIMEOUT``，缺省为 ``_DEFAULT_RETRIEVER_TIMEOUT``。"""
+    if explicit is not None:
+        return float(explicit)
+    raw = (os.environ.get("SE_RETRIEVER_TIMEOUT") or "").strip()
+    if not raw:
+        return _DEFAULT_RETRIEVER_TIMEOUT
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return _DEFAULT_RETRIEVER_TIMEOUT
 
 
 def parse_is_success(raw: Any) -> bool:
@@ -80,7 +96,7 @@ class SkillManager:
         retrieve_mode: RetrieveMode | str = RetrieveMode.HYBRID,
         retrieve_lambda: float = 0.5,
         retriever_url: str = DEFAULT_RETRIEVER_URL,
-        retriever_timeout: float = 30.0,
+        retriever_timeout: float | None = None,
         persist_path: str | Path | None = None,
         utility_alpha: float = 0.1,
         utility_tau: float = 0.2,
@@ -91,7 +107,7 @@ class SkillManager:
         self.retrieve_mode = retrieve_mode
         self.retrieve_lambda = retrieve_lambda
         self._retriever_url = retriever_url.rstrip("/")
-        self._retriever_timeout = retriever_timeout
+        self._retriever_timeout = _resolve_retriever_timeout(retriever_timeout)
         self._persist_path: Path = Path(persist_path) if persist_path else DEFAULT_SKILLS_JSONL
         self._utility_alpha = float(utility_alpha)
         self._utility_tau = float(utility_tau)

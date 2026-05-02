@@ -30,7 +30,7 @@ data_file=${SE_DATA_DIR}/${data_name}.jsonl
 
 project_name="${SE_PROJECT_NAME:-Skill_Evo}"
 export project_name
-exp_name=data_${data_name}_model_${base_model_name}_v1
+exp_name=data_${data_name}_model_${base_model_name}_v2
 export exp_name
 variant="${exp_name}"
 SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
@@ -158,6 +158,8 @@ export RETRIEVER_GPU_MEMORY_UTILIZATION
 export RETRIEVER_INSTRUCT_TASK
 export RETRIEVER_IDLE_TIMEOUT
 export SE_RETRIEVER_URL="http://${RETRIEVER_HOST}:${RETRIEVER_PORT}"
+# SkillManager 调用 retriever_server /rank、/health 的 HTTP 读超时（秒）；prepare_solver_skills 逐条检索时建议 ≥300
+export SE_RETRIEVER_TIMEOUT="${SE_RETRIEVER_TIMEOUT:-300}"
 
 # start_retriever_server.sh 也读 RETRIEVER_* / SE_RETRIEVER_*
 RETRIEVER_MAX_WAIT_S="${RETRIEVER_MAX_WAIT_S:-300}"

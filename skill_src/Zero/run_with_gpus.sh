@@ -50,7 +50,7 @@ GPU_MEMORY_THRESHOLD_MB="${GPU_MEMORY_THRESHOLD_MB:-40000}"      # 显存占用�
 GPU_UTIL_THRESHOLD="${GPU_UTIL_THRESHOLD:-20}"                  # 利用率低于此值视为空闲(%)
 
 # 轮询配置
-POLL_INTERVAL="${POLL_INTERVAL:-600}"                            # 检查间隔（秒）
+POLL_INTERVAL="${POLL_INTERVAL:-1800}"                            # 检查间隔（秒）
 MAX_WAIT_HOURS="${MAX_WAIT_HOURS:-48}"                          # 最大等待时间（小时）
 
 # Rollout Server 配置

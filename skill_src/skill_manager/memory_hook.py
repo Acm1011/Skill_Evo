@@ -56,16 +56,41 @@ def _retriever_url() -> str:
     return os.environ.get("SE_RETRIEVER_URL", DEFAULT_RETRIEVER_URL)
 
 
+def _solver_retrieve_top_k() -> int:
+    """``prepare_solver_skills`` → ``/rank`` 的 ``top_k``；默认 ``3``（勿传 ``None``，否则会返回整库索引）。
+    覆盖：环境变量 ``SE_SOLVER_RETRIEVE_TOP_K``。
+    """
+    raw = (os.environ.get("SE_SOLVER_RETRIEVE_TOP_K") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 3
+
+
+def _skill_memory_max_capacity_from_env() -> int:
+    """读 ``SE_SKILL_MEMORY_MAX_CAPACITY``；默认 1000。
+
+    整合多步 reward 时唯一题可远多于单步；容量过小会在 ingest 时淘汰 skill、在 load_jsonl 时截断。
+    显式设为 1000 可恢复旧 SkillManager 默认值。
+    """
+    raw = (os.environ.get("SE_SKILL_MEMORY_MAX_CAPACITY") or "1000").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 8192
+
+
 def cmd_after_sync(args: argparse.Namespace) -> int:
     _add_skill_src_to_path()
-    from skill_manager.skill_controller import SkillController
+    from skill_manager.skill_controller import SkillController, synth_reward_info_jsonl_paths
     from skill_manager.skill_manager import SkillManager
 
     r_url = _retriever_url()
 
     exp = args.exp_version
     syn_storage = Path(args.synthesizer_path_dir) / exp
-    step = int(args.synth_step)
     data_jsonl = Path(args.data_file)
     mem_dir = Path(args.memory_path_dir)
     mem_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +103,8 @@ def cmd_after_sync(args: argparse.Namespace) -> int:
         prev_sol_path = mem_dir / f"memory_after_sol_v{prev_n}.jsonl"
 
     out_mem = mem_dir / f"memory_after_syn_{sl}.jsonl"
-    manager = SkillManager(persist_path=out_mem, retriever_url=r_url)
+    cap = _skill_memory_max_capacity_from_env()
+    manager = SkillManager(persist_path=out_mem, retriever_url=r_url, max_capacity=cap)
     if prev_sol_path and prev_sol_path.is_file():
         manager.load_jsonl(prev_sol_path)
     ctrl = SkillController(manager)
@@ -87,13 +113,46 @@ def cmd_after_sync(args: argparse.Namespace) -> int:
     except ValueError:
         mem_min = 0.0
     try:
-        ctrl.ingest_skills_from_synth_reward_step(
-            syn_storage,
-            step,
-            assign_id_if_missing=True,
-            use_eviction=True,
-            memory_min_utility=mem_min,
+        single_only = (
+            (os.environ.get("SE_SYNTH_REWARD_INGEST_SINGLE_STEP_ONLY") or "")
+            .strip()
+            .lower()
+            in {"1", "true", "yes"}
         )
+        if single_only:
+            step = int(args.synth_step)
+            ctrl.ingest_skills_from_synth_reward_step(
+                syn_storage,
+                step,
+                assign_id_if_missing=True,
+                use_eviction=True,
+                memory_min_utility=mem_min,
+            )
+            print(
+                f"[memory_hook] after_sync: ingest single synth step file (--synth-step {step}, "
+                f"SE_SYNTH_REWARD_INGEST_SINGLE_STEP_ONLY=1)",
+                file=sys.stderr,
+            )
+        else:
+            paths = synth_reward_info_jsonl_paths(syn_storage)
+            if not paths:
+                print(
+                    f"[memory_hook] ingest: no exp_data_step_*.jsonl under {syn_storage / 'reward_info'}",
+                    file=sys.stderr,
+                )
+                return 1
+            ctrl.ingest_skills_from_synth_reward_dir(
+                syn_storage,
+                assign_id_if_missing=True,
+                use_eviction=True,
+                memory_min_utility=mem_min,
+            )
+            print(
+                f"[memory_hook] after_sync: ingested synth reward "
+                f"from all {len(paths)} files under reward_info "
+                f"({paths[0].name} … {paths[-1].name})",
+                file=sys.stderr,
+            )
     except FileNotFoundError as e:
         print(f"[memory_hook] ingest: {e}", file=sys.stderr)
         return 1
@@ -155,8 +214,9 @@ def cmd_after_sync(args: argparse.Namespace) -> int:
         for rec in _slice:
             tmp.write(json.dumps(rec, ensure_ascii=False) + "\n")
         tmp_path = tmp.name
+    rk = _solver_retrieve_top_k()
     try:
-        ctrl.prepare_solver_skills(tmp_path, out_parquet=out_parq)
+        ctrl.prepare_solver_skills(tmp_path, out_parquet=out_parq, top_k=rk)
     finally:
         try:
             os.unlink(tmp_path)
@@ -165,7 +225,7 @@ def cmd_after_sync(args: argparse.Namespace) -> int:
 
     if tdf:
         out_test = sol_dir / "test_data.parquet"
-        ctrl.prepare_solver_skills(Path(tdf), out_parquet=out_test)
+        ctrl.prepare_solver_skills(Path(tdf), out_parquet=out_test, top_k=rk)
         print(f"[memory_hook] after_sync: wrote {out_test!s}", file=sys.stderr)
 
     manager.save_jsonl()
@@ -175,7 +235,7 @@ def cmd_after_sync(args: argparse.Namespace) -> int:
         f"(batch={sbs}×steps={sol_steps}); cursor -> {next_c!s}",
         file=sys.stderr,
     )
-    print(f"[memory_hook] after_sync: wrote {out_mem!s}, {out_parq!s}")
+    print(f"[memory_hook] after_sync: wrote {out_mem!s}, {out_parq!s} (skill_memory_max_capacity={cap})")
     return 0
 
 
@@ -209,7 +269,8 @@ def cmd_after_solver(args: argparse.Namespace) -> int:
         return 1
 
     r_url = _retriever_url()
-    manager = SkillManager(persist_path=out_sol, retriever_url=r_url)
+    cap = _skill_memory_max_capacity_from_env()
+    manager = SkillManager(persist_path=out_sol, retriever_url=r_url, max_capacity=cap)
     manager.load_jsonl(mem_syn)
     ctrl = SkillController(manager)
     ctrl.update_utilities_from_rewards_jsonl(reward_path, persist=True)
@@ -239,10 +300,11 @@ def cmd_prepare_test(args: argparse.Namespace) -> int:
     out_test = sol_dir / "test_data.parquet"
 
     r_url = _retriever_url()
-    manager = SkillManager(persist_path=mem_syn, retriever_url=r_url)
+    cap = _skill_memory_max_capacity_from_env()
+    manager = SkillManager(persist_path=mem_syn, retriever_url=r_url, max_capacity=cap)
     manager.load_jsonl(mem_syn)
     ctrl = SkillController(manager)
-    ctrl.prepare_solver_skills(test_path, out_parquet=out_test)
+    ctrl.prepare_solver_skills(test_path, out_parquet=out_test, top_k=_solver_retrieve_top_k())
     print(f"[memory_hook] prepare-test: wrote {out_test!s}", file=sys.stderr)
     return 0
 
@@ -253,7 +315,13 @@ def main() -> int:
 
     ps = sub.add_parser("after-sync", help="Synthesizer 后 ingest + prepare solver parquet")
     ps.add_argument("exp_version", help="e.g. V1")
-    ps.add_argument("--synth-step", dest="synth_step", default="20")
+    ps.add_argument(
+        "--synth-step",
+        dest="synth_step",
+        default="20",
+        help="仅当设置环境变量 SE_SYNTH_REWARD_INGEST_SINGLE_STEP_ONLY=1 时使用单文件 "
+        "reward_info/exp_data_step_{step:03}.jsonl；默认入库整个 reward_info 下全部 exp_data_step_*.jsonl",
+    )
     ps.add_argument("--synthesizer-path-dir", required=True)
     ps.add_argument("--solver-path-dir", required=True)
     ps.add_argument("--memory-path-dir", required=True)
