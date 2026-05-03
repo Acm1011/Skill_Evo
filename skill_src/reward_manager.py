@@ -290,7 +290,7 @@ class SynthsizerRewardManager(AbstractRewardManager):
         self.storage_path = storage_path
         self.rollout_server_urls = rollout_server_urls
         self.rollout_request_timeout = rollout_request_timeout
-        _rt = os.environ.get("SYNTH_ROLLOUT_REQUEST_TIMEOUT", "").strip()
+        _rt = os.environ.get("SYNTH_ROLLOUT_REQUEST_TIMEOUT", "1800").strip()
         if _rt:
             try:
                 self.rollout_request_timeout = max(1.0, float(_rt))

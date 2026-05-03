@@ -58,7 +58,7 @@ filter_lower=0.25
 filter_high=0.75
 
 max_num_gen_batches=10 # 10 个 batch 的数据fileter以后，还没有凑够1个batch
-solver_batch_size="${solver_batch_size:-16}"
+solver_batch_size="${solver_batch_size:-${SE_SOLVER_BATCH_SIZE:-16}}"
 val_batch_size=512 # 验证集 batch size
 
 # Paths（须早于 gen_batch 计算：verl train DataLoader 为 drop_last=True 且 batch_size=data.gen_batch_size）

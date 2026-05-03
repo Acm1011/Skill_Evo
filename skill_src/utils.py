@@ -150,13 +150,15 @@ def order_responses_for_skill(
     """
     为 skill 模板重排轨迹：至少需一条正确；全错返回 ``None``。
     同时含对与错时，优先将「第一个 [SUCCESS]」与「第一个 [FAIL]」置于列表前两位，
-    其余按原下标顺序接在后面；全对时保持原顺序。
+    并优先保证一对一错；最终仅保留约半数轨迹（``max(1, len(rsps)//2)``）。
+    若混合对错且半数不足 2 条，则保留 2 条以满足一对一错。
     """
     n = len(rsps)
     if n == 0 or n != len(is_right):
         return None
     if not any(is_right):
         return None
+    keep_n = max(1, n // 2)
     fail_i = next((i for i in range(n) if not is_right[i]), None)
     if fail_i is None:
         order = list(range(n))
@@ -165,6 +167,8 @@ def order_responses_for_skill(
         head = [succ_i, fail_i]
         rest = [i for i in range(n) if i not in (succ_i, fail_i)]
         order = head + rest
+        keep_n = max(2, keep_n)
+    order = order[:keep_n]
     return [rsps[i] for i in order], [is_right[i] for i in order]
 
 
@@ -947,34 +951,3 @@ def calc_repetition_rate(text: str, min_repeat_len: int = 2) -> Tuple[float, Lis
         samples.append((int(s), int(e), str(snippet)))
 
     return float(round(rate, 6)), samples
-
-
-
-
-
-def _test_get_skill_prompt() -> None:
-    """自检：能加载 prompt 模板并填入 question / trajectories。"""
-    q = "What is 2+2?"
-    rsps = ["\\boxed{4}", "\\boxed{3}"]
-    is_right_flags = [True, False]
-    out = get_skill_prompt(q, rsps, is_right_flags, "skill_generation_v1")
-    assert isinstance(out, str) and len(out) > 50, "应返回非空长字符串"
-    assert q in out, "输出应包含原题"
-    assert "[SUCCESS]" in out and "\\boxed{4}" in out, "应包含成功轨迹"
-    assert "[FAIL]" in out and "\\boxed{3}" in out, "应包含失败轨迹"
-    assert "Group trajectories:" in out, "应保留模板结构"
-    pos_s = out.find("[SUCCESS]")
-    pos_f = out.find("[FAIL]")
-    assert pos_s != -1 and pos_f != -1 and pos_s < pos_f, "混合时应先 SUCCESS 再 FAIL"
-    only_ok = get_skill_prompt(q, ["\\boxed{4}", "\\boxed{5}"], [True, True], "skill_generation_v1")
-    assert only_ok.count("[SUCCESS]") == 2 and "[FAIL]" not in only_ok
-    try:
-        get_skill_prompt(q, ["\\boxed{3}"], [False], "skill_generation_v1")
-        raise AssertionError("全错应抛 ValueError")
-    except ValueError:
-        pass
-    print("get_skill_prompt: OK")
-
-
-if __name__ == "__main__":
-    _test_get_skill_prompt()

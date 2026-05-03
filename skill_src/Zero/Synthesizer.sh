@@ -87,6 +87,7 @@ ROLLOUT_BASE_PORT="${SE_ROLLOUT_BASE_PORT:-8760}"
 # 后者由 SynthsizerRewardManager.rollout_request_timeout（默认约 2000s，可用
 # SYNTH_ROLLOUT_REQUEST_TIMEOUT 覆盖）控制，见 skill_src/reward_manager.py。
 MAX_WAIT=300
+export SYNTH_ROLLOUT_REQUEST_TIMEOUT="${SYNTH_ROLLOUT_REQUEST_TIMEOUT:-1800}"
 
 echo "[GPU配置] 训练/ reward 阶段 — Synthesizer GPUs: ${SYNTH_GPU_IDS} (${N_SYNTH_GPUS} 张)"
 echo "[GPU配置] 训练/ reward 阶段 — Rollout GPUs:     ${ROLLOUT_GPU_IDS} (${N_ROLLOUT_SERVERS} 张)"
@@ -162,20 +163,11 @@ done
 echo ""
 echo "========== Step 2: 离线 rollout =========="
 
-SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER="${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-2}}"
-export SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER
+# --steps：与 main_o.sh、main.sh 等一致，优先 SE_OFFLINE_ROLLOUT_DRIVER_STEPS；单独跑本脚本时用第4参×mult（main_o 第4参为 verl T+2，offline 仍以基座 T×mult 为准）
+OFFLINE_DRIVER_STEPS="${SE_OFFLINE_ROLLOUT_DRIVER_STEPS:-$(( SYNTH_PPO_STEPS * ${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-1}} ))}"
 
-# offline need = (T×mult) × batch
-OFFLINE_DRIVER_STEPS=$(( SYNTH_PPO_STEPS * SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER ))
-OFFLINE_DRIVER_BATCH="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-${SYNTH_BATCH_SIZE:-16}}"
-_OFFLINE_NEED=$(( OFFLINE_DRIVER_STEPS * OFFLINE_DRIVER_BATCH ))
-
-echo "  data_file: ${data_file}"
-echo "  PPO 训练步数 T=${SYNTH_PPO_STEPS}  (trainer.total_training_steps 与此一致)"
-echo "  offline driver: --steps ${OFFLINE_DRIVER_STEPS} (= T×mult)  --batch-size ${OFFLINE_DRIVER_BATCH}  (need target=${_OFFLINE_NEED} rows; mult=${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER})"
-echo "  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
-# 默认不 reset，使 train_cursor_state.json / data_cursor.txt 跨次运行向前消费；仅 SE_OFFLINE_RESET_STATE=1 时从 cursor=0 重算
-SE_OFFLINE_RESET_STATE="${SE_OFFLINE_RESET_STATE:-0}"
+# 与本次 HTTP 请求一致的参数由 solver_offline_driver 在发往 server 前打印
+# 默认不 reset（由 main*.sh 导出 SE_OFFLINE_RESET_STATE，未导出视为 0）；仅 =1 时从 cursor=0 重算
 
 cd "${SE_WORKING_DIR}"
 # driver 用 SE_ROLLOUT_BASE_PORT + SE_ROLLOUT_N_SERVERS 解析各 server URL（须与 Step 1 全卡数一致）
@@ -184,7 +176,7 @@ offline_cmd=(
     python3 -m "${SE_CODE_MODULE}.solver_offline_driver" run
     --data-files "${data_file}"
     --steps "${OFFLINE_DRIVER_STEPS}"
-    --batch-size "${OFFLINE_DRIVER_BATCH}"
+    --batch-size "${SE_OFFLINE_ROLLOUT_BATCH_SIZE}"
     --work-dir "${OFFLINE_WORK_DIR}"
     --merge-output-dir "${OFFLINE_MERGE_DIR}"
     --merge-prefix "train_data"

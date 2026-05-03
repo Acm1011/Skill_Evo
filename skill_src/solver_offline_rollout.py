@@ -5,6 +5,7 @@ multiprocessing.set_start_method("spawn", force=True)
 
 import asyncio
 import uuid
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import vllm
@@ -202,10 +203,20 @@ async def run_rollout_async(
 
     async def _one(prompt: str, request_id: str) -> Any:
         final: Optional[RequestOutput] = None
+        outputs_by_index: Dict[int, Any] = {}
         async for out in engine.generate(prompt, sample_params, request_id):
             final = out
+            for output in getattr(out, "outputs", []) or []:
+                # vLLM async path can stream n>1 completions as separate updates.
+                # Keep the latest text per completion index instead of only the last update.
+                idx = int(getattr(output, "index", len(outputs_by_index)))
+                outputs_by_index[idx] = output
         if final is None:
             raise RuntimeError(f"vLLM 未返回输出 request_id={request_id!r}")
+        if outputs_by_index:
+            return SimpleNamespace(
+                outputs=[outputs_by_index[i] for i in sorted(outputs_by_index)]
+            )
         return final
 
     rids = [f"rollout-{uuid.uuid4().hex}" for _ in prompt_texts]

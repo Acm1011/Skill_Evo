@@ -30,7 +30,7 @@ data_file=${SE_DATA_DIR}/${data_name}.jsonl
 
 project_name="${SE_PROJECT_NAME:-Skill_Evo}"
 export project_name
-exp_name=data_${data_name}_model_${base_model_name}_v2
+exp_name=data_${data_name}_model_${base_model_name}_v3
 export exp_name
 variant="${exp_name}"
 SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
@@ -74,9 +74,10 @@ export SE_N_GPUS SE_GPU_IDS
 
 # =============================================================================
 # Offline Rollout 参数
-# 说明：mult 仅用于 offline 多采样本。offline driver need ≈ (T×mult)×SYNTH_BATCH。
-#   verl 实际 total_training_steps 见下方 synthesizer_training_steps（当前为 基座T+2，非纯 T）。
-#   仍可用旧名 SE_OFFLINE_ROLLOUT_STEPS 作为 mult
+# 说明：SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER 只放大 offline driver 的 --steps（基座 T×mult），
+#   need≈steps×batch。server 侧 vLLM SamplingParams.n 与 --rollout-n（SE_OFFLINE_ROLLOUT_N）一致，不再单独倍率。
+#   verl total_training_steps 见下方 synthesizer_training_steps（基座 T+2）。
+#   仍可用旧名 SE_OFFLINE_ROLLOUT_STEPS 作为 BATCH_MULTIPLIER 的缺省来源。
 # =============================================================================
 export SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER="${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-1}}"
 export SE_OFFLINE_ROLLOUT_BATCH_SIZE="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-128}"
@@ -96,7 +97,7 @@ SE_SYNTHESIZER_TRAINING_STEPS_BASE="${SE_SYNTHESIZER_TRAINING_STEPS:-20}"
 export SE_SYNTHESIZER_TRAINING_STEPS_BASE
 SE_OFFLINE_ROLLOUT_DRIVER_STEPS=$(( SE_SYNTHESIZER_TRAINING_STEPS_BASE * SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER ))
 export SE_OFFLINE_ROLLOUT_DRIVER_STEPS
-synthesizer_training_steps="$((SE_SYNTHESIZER_TRAINING_STEPS_BASE+2))"
+synthesizer_training_steps="$((SE_SYNTHESIZER_TRAINING_STEPS_BASE+1))"
 export synthesizer_training_steps
 export SE_SYNTHESIZER_STEPS="${synthesizer_training_steps}"
 export SE_SYNTHESIZER_TRAINING_STEPS="${SE_SYNTHESIZER_TRAINING_STEPS_BASE}"
@@ -114,12 +115,17 @@ export SYNTH_GPU_MEM_UTIL="${SYNTH_GPU_MEM_UTIL:-0.60}"
 export SYNTH_RANDOM_Q_COEF="${SYNTH_RANDOM_Q_COEF:-0.5}"
 export SYNTH_USE_SKILL_TYPE="${SYNTH_USE_SKILL_TYPE:-skill_use_v1}"
 export SYNTH_SOLVER_ROLLOUT_MAX_WORKERS="${SYNTH_SOLVER_ROLLOUT_MAX_WORKERS:-512}"
+# 离线 rollout：设为 >0（如 32/64）时按连续样本切多笔 HTTP POST 并行；0=每台 GPU 只发一单大包（并行≈GPU 数）
+export SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE="${SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE:-0}"
 
 # =============================================================================
 # Solver 训练超参数（供 solver.sh 子进程；tensorboard 路径与 exp 名）
 # =============================================================================
 solver_retrain_steps="${SE_SOLVER_RETRAIN_STEPS:-40}"
 export solver_retrain_steps
+# solver.sh 内 trainer.total_training_steps = 传参 +5（DAPO/verl 约定）；resume 与 prev ckpt 路径须与此一致
+solver_training_total_steps="$((solver_retrain_steps + 5))"
+export solver_training_total_steps
 solver_batch_size="${SE_SOLVER_BATCH_SIZE:-128}"
 rollout_n="${SE_SOLVER_ROLLOUT_N:-4}"
 export SE_SOLVER_BATCH_SIZE="${solver_batch_size}"
@@ -166,8 +172,8 @@ RETRIEVER_MAX_WAIT_S="${RETRIEVER_MAX_WAIT_S:-300}"
 
 # =============================================================================
 # Resume：从已有 ckpt / memory / merged 训练数据 续跑，跳过已完成阶段
-#   SE_RESUME=1|true|yes 时启用；Synthesizer ckpt global_step_* 与 PPO 总步 = 基座 T 对齐；Solver 以
-#   SE_SOLVER_RETRAIN_STEPS 为准
+#   SE_RESUME=1|true|yes 时启用；Synthesizer ckpt global_step_* = synthesizer_training_steps（T+2）；
+#   Solver ckpt global_step_* = solver_training_total_steps（= SE_SOLVER_RETRAIN_STEPS+5，与 solver.sh 一致）
 #   无 Synthesizer 最终 ckpt 但已有 merged/train_data.(parquet|jsonl) 时：跳过 offline、仅跑 RL（见 se_synth_merged_train_ready）
 #   memory: memory_after_syn_vN.jsonl / memory_after_sol_vN.jsonl（N 为版本号 1,2,…）
 # =============================================================================
@@ -207,7 +213,7 @@ se_resume_skip_mem_sync() {
 se_resume_skip_solver() {
     local ev="$1"
     se_resume_is_true || return 1
-    [ -d "${solver_path_dir}/${ev}/ckpts/global_step_${solver_retrain_steps}/actor/huggingface" ]
+    [ -d "${solver_path_dir}/${ev}/ckpts/global_step_${solver_training_total_steps}/actor/huggingface" ]
 }
 
 # 若已存在则跳过后续 after_solver
@@ -320,7 +326,7 @@ main_o_write_experiment_config() {
             [[ -v $__k ]] && printf '%s=%q\n' "$__k" "${!__k}"
         done
         printf '\n%s\n' '# ========== Solver & evolution =========='
-        for __k in solver_retrain_steps SE_SOLVER_RETRAIN_STEPS solver_batch_size SE_SOLVER_BATCH_SIZE \
+        for __k in solver_retrain_steps solver_training_total_steps SE_SOLVER_RETRAIN_STEPS solver_batch_size SE_SOLVER_BATCH_SIZE \
             rollout_n SE_SOLVER_ROLLOUT_N SE_MEMORY_MIN_UTILITY skill_evo_num_rounds SE_SKILL_EVO_NUM_ROUNDS \
             solver_eval_step solver_eval_temperature; do
             [[ -v $__k ]] && printf '%s=%q\n' "$__k" "${!__k}"
@@ -363,7 +369,7 @@ for iter in $(seq 1 "${skill_evo_num_rounds}"); do
         prev_solver_model_path="${base_model_path}"
     else
         prev_synthesizer_model_path="${synthesizer_path_dir}/V$((iter - 1))/ckpts/global_step_${synthesizer_training_steps}/actor/huggingface"
-        prev_solver_model_path="${solver_path_dir}/V$((iter - 1))/ckpts/global_step_${solver_retrain_steps}/actor/huggingface"
+        prev_solver_model_path="${solver_path_dir}/V$((iter - 1))/ckpts/global_step_${solver_training_total_steps}/actor/huggingface"
     fi
 
     if se_resume_skip_synth "${exp_version}"; then
@@ -396,7 +402,7 @@ for iter in $(seq 1 "${skill_evo_num_rounds}"); do
     fi
 
     if se_resume_skip_solver "${exp_version}"; then
-        echo "[resume] 跳过 Solver ${exp_version}（已有 .../ckpts/global_step_${solver_retrain_steps}/actor/huggingface）"
+        echo "[resume] 跳过 Solver ${exp_version}（已有 .../ckpts/global_step_${solver_training_total_steps}/actor/huggingface）"
     else
         echo "训练 Solver (${exp_name} ${exp_version})..."
         bash "${SCRIPT_DIR}/solver.sh" "${exp_version}" "${prev_solver_model_path}" "${solver_retrain_steps}" || {

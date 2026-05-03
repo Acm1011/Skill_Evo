@@ -24,8 +24,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="${SCRIPT_DIR}/../skill_manager/memory_hook.py"
 exp_version="${1:?exp_version e.g. V1 required}"
 
-export SE_MEMORY_MIN_UTILITY="${SE_MEMORY_MIN_UTILITY:-0}"
-
 if [ -z "${data_file:-}" ] && [ -n "${SE_DATA_FILE:-}" ]; then
   data_file="${SE_DATA_FILE}"
 fi

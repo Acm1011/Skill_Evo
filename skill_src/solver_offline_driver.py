@@ -17,9 +17,12 @@
   默认将本分片样本以 JSON（data_records）POST 到各 server，结果从响应体收集，不落临时分片盘。
   合并后 ``enrich_merged_rows_from_dataset`` + ``build_merged_rollout_records``：
   回填 ``topic``/``difficulty`` 后做 random / embedding 对照题并拼好 merged 格式（顶层 skill prompt 等）。
-  ``run`` 使用 ``--rollout-multiplier``（默认 2）放大 server 侧 rollout 次数；全错样本丢弃，
+  ``--rollout-n`` 原样写入 HTTP 请求体，server 上 vLLM ``SamplingParams.n`` 与之相同。全错样本丢弃，
   有效条数不足时自动多波 rollout，游标按本轮实际消费的原始样本总数推进。
-  每波分片请求用 ``ThreadPoolExecutor``（默认 ``--rollout-max-workers`` 512，实际并发不超过分片数）。
+  每波用 ``ThreadPoolExecutor`` 并发 HTTP（``--rollout-max-workers`` 默认同上，上限常 512）。
+  默认 ``--rollout-http-chunk-size`` 为 0：**仅按 GPU 数均分**，每 GPU 一单大包，并发最多为 GPU 台数；
+  设为正整数则按连续样本切成小块并轮询各 server（类似 reward ``_solver_use_skill``
+  ``min(N_requests, workers)``），并发为 ``min(ceil(wave/chunk_size), workers)``。
   若需旧版「写 shard jsonl + 读返回路径」可加 --shard-via-disk。
 
   若 server 由 shell 提前启动，可在成功后释放一半 GPU 供后续 RL：
@@ -1055,20 +1058,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     if n_servers == 0:
         raise ValueError("请提供 --server-urls 或配置 SE_ROLLOUT_SERVER_URLS / SE_ROLLOUT_N_SERVERS")
 
-    mult = float(args.rollout_multiplier)
-    effective_rollout_n = max(1, int(round(args.rollout_n * mult)))
-    print(
-        f"[driver] rollout_n={args.rollout_n} × multiplier={mult} "
-        f"-> effective_rollout_n={effective_rollout_n}"
-    )
-
     valid_accum: List[Dict[str, Any]] = []
     cursor_pos = state.cursor
     rolled_total = 0
     wave_id = 0
 
     common_body = {
-        "rollout_n": effective_rollout_n,
+        "rollout_n": max(1, int(args.rollout_n)),
         "max_tokens": args.max_tokens,
         "top_k": args.top_k,
         "top_p": args.top_p,
@@ -1078,6 +1074,24 @@ def cmd_run(args: argparse.Namespace) -> None:
         "skill_type": args.skill_type,
         "storage_path": work_dir,
     }
+
+    mp = (getattr(args, "model_path", "") or "").strip()
+    dfs_display = data_files if len(data_files) <= 3 else data_files[:3] + [f"... (+{len(data_files) - 3} more)"]
+    extra_mp = f"\n  --model-path（仅记录，推理在 server）: {mp}" if mp else ""
+    print(
+        "[driver] 即将向 rollout HTTP server 发送请求（以下为实际入参与 common_body 对齐）：\n"
+        f"  data_files ({len(data_files)}): {dfs_display}\n"
+        f"  --steps {args.steps}  --batch-size {args.batch_size}  need={need} (steps×batch，有效条数目标)\n"
+        f"  --rollout-n {args.rollout_n}（请求体与 server vLLM SamplingParams.n 一致）\n"
+        f"  --num-random-questions {args.num_random_questions}（server 侧本条为 0；random 在 build_merged 阶段）\n"
+        f"  ThreadPoolExecutor 上限={args.rollout_max_workers}；"
+        f"--rollout-http-chunk-size={getattr(args, 'rollout_http_chunk_size', 0)} "
+        f"（0=每 GPU 一整包并行数≈GPU 台数；>0 时每波拆成多块 POST，并发=min(HTTP 任务数, 上限)，"
+        f"对齐 reward 的多连接；ENV SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE）\n"
+        f"  servers: n={n_servers}  urls={server_urls!r}"
+        f"{extra_mp}",
+        flush=True,
+    )
 
     def _one(task: Dict[str, Any]) -> Tuple[int, int, List[Dict[str, Any]]]:
         body = {
@@ -1126,35 +1140,70 @@ def cmd_run(args: argparse.Namespace) -> None:
             f"servers={n_servers} urls={server_urls!r}"
         )
 
-        sizes = split_sizes(len(this_round), n_servers)
+        chunk_sz_cfg = max(0, int(getattr(args, "rollout_http_chunk_size", 0) or 0))
         shard_tasks: List[Dict[str, Any]] = []
-        offset = 0
-        for shard_id, sz in enumerate(sizes):
-            if sz == 0:
-                continue
-            chunk = this_round[offset : offset + sz]
-            global_base = indices[offset]
-            offset += sz
-            task: Dict[str, Any] = {
-                "shard_id": shard_id,
-                "size": sz,
-                "global_base": global_base,
-                "records": chunk,
-                "server_url": server_urls[shard_id % n_servers],
-                "suffix": f"r{initial_cursor}_w{wave_id}_s{shard_id}",
-            }
-            if args.shard_via_disk:
-                shard_path = os.path.join(
-                    work_dir, f"round_w{wave_id}_shard_{shard_id}.jsonl"
-                )
-                write_jsonl(shard_path, chunk)
-                task["data_file"] = shard_path
-            shard_tasks.append(task)
+        if chunk_sz_cfg <= 0:
+            sizes = split_sizes(len(this_round), n_servers)
+            offset = 0
+            for shard_id, sz in enumerate(sizes):
+                if sz == 0:
+                    continue
+                chunk_rows = this_round[offset : offset + sz]
+                global_base = indices[offset]
+                offset += sz
+                task: Dict[str, Any] = {
+                    "shard_id": shard_id,
+                    "size": sz,
+                    "global_base": global_base,
+                    "records": chunk_rows,
+                    "server_url": server_urls[shard_id % n_servers],
+                    "suffix": f"r{initial_cursor}_w{wave_id}_s{shard_id}",
+                }
+                if args.shard_via_disk:
+                    shard_path = os.path.join(
+                        work_dir, f"round_w{wave_id}_shard_{shard_id}.jsonl"
+                    )
+                    write_jsonl(shard_path, chunk_rows)
+                    task["data_file"] = shard_path
+                shard_tasks.append(task)
+        else:
+            chunk_sz = max(1, chunk_sz_cfg)
+            task_id = 0
+            for start_off in range(0, wave_n, chunk_sz):
+                end_off = min(start_off + chunk_sz, wave_n)
+                chunk_rows = this_round[start_off:end_off]
+                global_base = indices[start_off]
+                sz = len(chunk_rows)
+                task = {
+                    "shard_id": task_id,
+                    "size": sz,
+                    "global_base": global_base,
+                    "records": chunk_rows,
+                    "server_url": server_urls[task_id % n_servers],
+                    "suffix": f"r{initial_cursor}_w{wave_id}_c{task_id}",
+                }
+                if args.shard_via_disk:
+                    shard_path = os.path.join(
+                        work_dir,
+                        f"round_w{wave_id}_chunk_{task_id}.jsonl",
+                    )
+                    write_jsonl(shard_path, chunk_rows)
+                    task["data_file"] = shard_path
+                shard_tasks.append(task)
+                task_id += 1
 
         shard_outputs: List[Tuple[int, List[Dict[str, Any]]]] = []
-        print(f"[driver] wave {wave_id} shard_tasks={len(shard_tasks)} start rollout")
-        _pool = max(
-            1, min(int(args.rollout_max_workers), len(shard_tasks))
+        n_tasks = len(shard_tasks)
+        _pool = max(1, min(int(args.rollout_max_workers), n_tasks))
+        mode = (
+            "chunked_http"
+            if chunk_sz_cfg > 0
+            else "single_request_per_gpu"
+        )
+        print(
+            f"[driver] wave {wave_id} HTTP_tasks={n_tasks} mode={mode} chunk_size cfg={chunk_sz_cfg} "
+            f"ThreadPoolExecutor max_workers={_pool}（cap={args.rollout_max_workers}）start rollout",
+            flush=True,
         )
         with ThreadPoolExecutor(max_workers=_pool) as ex:
             futs = [ex.submit(_one, t) for t in shard_tasks]
@@ -1268,14 +1317,27 @@ def _env_int_min1(env_name: str, default: int) -> int:
         return max(1, default)
 
 
-def _env_rollout_multiplier_default(env_name: str, default: float) -> float:
-    v = (os.environ.get(env_name) or "").strip()
+def _offline_rollout_max_workers_default() -> int:
+    """与 Synthesizer reward 一致：优先 ``SYNTH_SOLVER_ROLLOUT_MAX_WORKERS``，否则 offline 专用变量。"""
+    for env_name in ("SYNTH_SOLVER_ROLLOUT_MAX_WORKERS", "SE_OFFLINE_DRIVER_ROLLOUT_MAX_WORKERS"):
+        v = (os.environ.get(env_name) or "").strip()
+        if v:
+            try:
+                return max(1, int(v))
+            except ValueError:
+                pass
+    return 512
+
+
+def _env_rollout_http_chunk_size_default() -> int:
+    """单次 POST ``data_records`` 最大条数；0 表示不切片（每 GPU 一整包）。``SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE``。"""
+    v = (os.environ.get("SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE") or "").strip()
     if not v:
-        return max(1.0, default)
+        return 0
     try:
-        return max(1.0, float(v))
+        return max(0, int(v))
     except ValueError:
-        return max(1.0, default)
+        return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1319,21 +1381,24 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--skill-type", type=str, default="skill_generation_v1")
     run.add_argument("--rollout-n", type=int, default=10)
     run.add_argument(
-        "--rollout-multiplier",
-        type=float,
-        default=_env_rollout_multiplier_default("SE_ROLLOUT_MULTIPLIER", 2.0),
+        "--rollout-max-workers",
+        type=int,
+        default=_offline_rollout_max_workers_default(),
         help=(
-            "发给 server 的 rollout 次数 = max(1, round(rollout_n * multiplier))；"
-            "默认 2，环境变量 SE_ROLLOUT_MULTIPLIER"
+            "每波 rollout 的 ThreadPoolExecutor 并发上限。"
+            "--rollout-http-chunk-size=0 时每 GPU 一单，并发通常≤GPU 台数；"
+            "为正时 HTTP 请求数=min(ceil(本波样本数/chunk_size), 本上限)。"
+            "未传参时优先 SYNTH_SOLVER_ROLLOUT_MAX_WORKERS，其次 SE_OFFLINE_DRIVER_ROLLOUT_MAX_WORKERS。"
         ),
     )
     run.add_argument(
-        "--rollout-max-workers",
+        "--rollout-http-chunk-size",
         type=int,
-        default=_env_int_min1("SE_OFFLINE_DRIVER_ROLLOUT_MAX_WORKERS", 512),
+        default=_env_rollout_http_chunk_size_default(),
         help=(
-            "每波分片 rollout 的线程池容量上限（实际并发 = min(本值, 分片任务数)，用于 I/O 并发；"
-            "非多进程）。环境变量 SE_OFFLINE_DRIVER_ROLLOUT_MAX_WORKERS"
+            "单次 POST body 中所含顶层样本上限；0（默认除非设 SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE）"
+            "= 整条 wave 只按 GPU 均分几大包。"
+            ">0 时对连续索引切片成多单并轮询各 server URL，可提高客户端并发。"
         ),
     )
     run.add_argument("--max-tokens", type=int, default=4096)

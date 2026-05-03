@@ -294,20 +294,17 @@ else
     mkdir -p "${OFFLINE_WORK_DIR}" "${OFFLINE_MERGE_DIR}"
 
     echo "  data_file: ${data_file}"
-    SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER="${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-2}}"
-    export SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER
-    OFFLINE_DRIVER_STEPS=$(( SYNTH_PPO_STEPS * SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER ))
-    OFFLINE_DRIVER_BATCH="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-${SYNTH_BATCH_SIZE:-16}}"
-    _OFFLINE_NEED=$(( OFFLINE_DRIVER_STEPS * OFFLINE_DRIVER_BATCH ))
-    echo "  PPO 训练步数 T=${SYNTH_PPO_STEPS}"
-    echo "  offline driver: --steps ${OFFLINE_DRIVER_STEPS} (= T×mult)  --batch-size ${OFFLINE_DRIVER_BATCH}  (need target=${_OFFLINE_NEED} rows; mult=${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER})  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
-    SE_OFFLINE_RESET_STATE="${SE_OFFLINE_RESET_STATE:-0}"
+    # 与 main_o.sh / main.sh 一致：优先 SE_OFFLINE_ROLLOUT_DRIVER_STEPS；否则 第4参×mult（main_o 第4参为 verl T+2）
+    OFFLINE_DRIVER_STEPS="${SE_OFFLINE_ROLLOUT_DRIVER_STEPS:-$(( SYNTH_PPO_STEPS * ${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-2}} ))}"
+    _offline_bsz="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-${SYNTH_BATCH_SIZE:-16}}"
+    _OFFLINE_NEED=$(( OFFLINE_DRIVER_STEPS * _offline_bsz ))
+    echo "  PPO 第4参=${SYNTH_PPO_STEPS}  offline: --steps ${OFFLINE_DRIVER_STEPS}  --batch-size ${_offline_bsz}  (need≈${_OFFLINE_NEED}; mult=${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER})  rollout_n=${SE_OFFLINE_ROLLOUT_N}"
 
     offline_cmd=(
         "${PYTHON}" -m "${SE_CODE_MODULE}.solver_offline_driver" run
         --data-files "${data_file}"
         --steps "${OFFLINE_DRIVER_STEPS}"
-        --batch-size "${OFFLINE_DRIVER_BATCH}"
+        --batch-size "${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-${SYNTH_BATCH_SIZE:-16}}"
         --work-dir "${OFFLINE_WORK_DIR}"
         --merge-output-dir "${OFFLINE_MERGE_DIR}"
         --merge-prefix "train_data"
