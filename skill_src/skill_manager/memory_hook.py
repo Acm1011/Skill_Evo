@@ -50,6 +50,21 @@ def _find_latest_train_reward(solver_dir: Path) -> Path | None:
     return max(files, key=_sort_key)
 
 
+def _find_latest_prev_memory_after_sol(mem_dir: Path, cur_v: int) -> Path | None:
+    """找 < cur_v 的最新 memory_after_sol_vN.jsonl。"""
+    best_v = -1
+    best_path: Path | None = None
+    for p in mem_dir.glob("memory_after_sol_v*.jsonl"):
+        m = re.match(r"memory_after_sol_v(\d+)\.jsonl$", p.name)
+        if not m:
+            continue
+        v = int(m.group(1))
+        if v < cur_v and v > best_v:
+            best_v = v
+            best_path = p
+    return best_path
+
+
 def _retriever_url() -> str:
     from skill_manager.skill_manager import DEFAULT_RETRIEVER_URL
 
@@ -99,13 +114,17 @@ def cmd_after_sync(args: argparse.Namespace) -> int:
     m_prev = re.match(r"v(\d+)$", sl)
     prev_sol_path: Path | None = None
     if m_prev and int(m_prev.group(1)) > 1:
-        prev_n = int(m_prev.group(1)) - 1
+        cur_n = int(m_prev.group(1))
+        prev_n = cur_n - 1
         prev_sol_path = mem_dir / f"memory_after_sol_v{prev_n}.jsonl"
+        if not prev_sol_path.is_file():
+            prev_sol_path = _find_latest_prev_memory_after_sol(mem_dir, cur_n)
 
     out_mem = mem_dir / f"memory_after_syn_{sl}.jsonl"
     cap = _skill_memory_max_capacity_from_env()
     manager = SkillManager(persist_path=out_mem, retriever_url=r_url, max_capacity=cap)
     if prev_sol_path and prev_sol_path.is_file():
+        print(f"[memory_hook] after_sync: load previous memory {prev_sol_path!s}", file=sys.stderr)
         manager.load_jsonl(prev_sol_path)
     ctrl = SkillController(manager)
     try:

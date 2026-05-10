@@ -14,6 +14,8 @@
 #   --temperature       采样温度 (默认: 0.6)
 #   --sample_ratio      采样比例 (默认: 0.1，用于 bbeh/mmlupro/supergpqa)
 #   --skip_base_model   跳过基础模型评测 (默认: false)
+#   --temp_data_file    temp_data parquet 路径（默认: 训练后生成的 temp_data_skill.parquet）
+#   --greedy_data_file  greedy_data parquet 路径（默认: 训练后生成的 greedy_data_skill.parquet）
 #
 # 示例:
 #   # 只需指定实验名称，自动发现所有 steps
@@ -27,18 +29,21 @@
 
 set -euo pipefail
 export VLLM_DISABLE_COMPILE_CACHE=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # =============================================================================
 # 参数解析
 # =============================================================================
 
-EXP_NAME=""
-CKPTS_DIR=""
-STEPS=""
-BASB_MODEL_NAME="${SB_MODEL_NAME:-}"
-TEMPERATURE="${TEMPERATURE:-0.6}"
+EXP_NAME="${SB_EXP_NAME:-data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v1_with_skills}"
+CKPTS_DIR="${SB_CKPTS_DIR:-/home/ycy/sdi/skill_saved/Skill_Evo/data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v3/Solver/V1/ckpts}"
+STEPS="${SB_STEPS:-}"
+BASB_MODEL_NAME="${SB_MODEL_NAME:-Qwen3-4B-Instruct-2507}"
+TEMPERATURE="${TEMPERATURE:-0.7}"
 SAMPLE_RATIO="${SAMPLE_RATIO:-0.1}"
 SKIP_BASE_MODEL="${SKIP_BASE_MODEL:-false}"
+TEMP_DATA_FILE="${TEMP_DATA_FILE:-/home/ycy/sdi/Skill_Evo/data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v3/temp_data_skill.parquet}"
+GREEDY_DATA_FILE="${GREEDY_DATA_FILE:-/home/ycy/sdi/Skill_Evo/data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v3/greedy_data_skill.parquet}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -70,6 +75,14 @@ while [[ $# -gt 0 ]]; do
             SKIP_BASE_MODEL="true"
             shift
             ;;
+        --temp_data_file)
+            TEMP_DATA_FILE="$2"
+            shift 2
+            ;;
+        --greedy_data_file)
+            GREEDY_DATA_FILE="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             shift
@@ -82,7 +95,15 @@ done
 # =============================================================================
 
 if [ -z "$EXP_NAME" ]; then
-    echo "Error: --exp_name is required"
+    echo "Error: EXP_NAME 为空，请在脚本内设置或通过 SB_EXP_NAME/--exp_name 传入"
+    exit 1
+fi
+if [ ! -f "$TEMP_DATA_FILE" ]; then
+    echo "Error: temp_data_file 不存在: $TEMP_DATA_FILE"
+    exit 1
+fi
+if [ ! -f "$GREEDY_DATA_FILE" ]; then
+    echo "Error: greedy_data_file 不存在: $GREEDY_DATA_FILE"
     exit 1
 fi
 
@@ -110,16 +131,17 @@ fi
 # 路径配置
 # =============================================================================
 
-project_name="${SB_PROJECT_NAME:-Self-evolving-Agent}"
-dir="${SB_BASB_DIR:-/home/ycy/data1}"
+project_name="${SB_PROJECT_NAME:-Skill_Evo}"
+dir="${SB_BASB_DIR:-/home/ycy/sdi}"
 model_dir="${SB_MODEL_DIR:-${dir}/models}"
 data_dir="${SB_DATA_DIR:-${dir}/data}"
-saved_results_dir="${SB_SAVED_RESULTS_DIR:-/home/ycy/data3/ttrl_saved}"
+saved_results_dir="${SB_SAVED_RESULTS_DIR:-/home/ycy/sdi/skill_saved/evaluation}"
 WORKING_DIR="${SB_WORKING_DIR:-${dir}/${project_name}}"
 save_path_dir=${saved_results_dir}/evaluation
 eval_path=${WORKING_DIR}/evaluation
 tb_path_dir=${saved_results_dir}/eval_tb_log
 eval_model_dir=${saved_results_dir}/Solver_ttrl_Base
+CUSTOM_EVAL_DATA_DIR="${WORKING_DIR}/evaluation/.eval_custom_data/${EXP_NAME}"
 
 # 如果用户没有指定 CKPTS_DIR，则根据 EXP_NAME 自动计算
 if [ -z "$CKPTS_DIR" ]; then
@@ -139,18 +161,18 @@ fi
 
 if [ -z "$STEPS" ]; then
     echo "自动发现 checkpoint steps..."
-    
-    # 查找所有 global_step_* 目录，提取数字并排序
-    STEPS=$(ls -d "${CKPTS_DIR}"/global_step_* 2>/dev/null | \
-            sed 's/.*global_step_//' | \
-            sort -n | \
-            tr '\n' ' ')
-    
-    if [ -z "$STEPS" ]; then
+
+    # 查找所有 global_step_* 目录；避免在 set -euo pipefail 下因无匹配直接退出
+    shopt -s nullglob
+    step_dirs=("${CKPTS_DIR}"/global_step_*)
+    shopt -u nullglob
+
+    if [ ${#step_dirs[@]} -eq 0 ]; then
         echo "Error: 没有找到任何 global_step_* 目录在 $CKPTS_DIR"
         exit 1
     fi
-    
+
+    STEPS=$(printf '%s\n' "${step_dirs[@]}" | sed 's/.*global_step_//' | sort -n | tr '\n' ' ')
     echo "发现的 steps: $STEPS"
 fi
 
@@ -158,6 +180,9 @@ fi
 eval_saved_path_dir=${save_path_dir}/${EXP_NAME}_temperature${TEMPERATURE}
 
 mkdir -p "${eval_saved_path_dir}" "${tb_path_dir}" "${WORKING_DIR}/eval_logs"
+mkdir -p "${CUSTOM_EVAL_DATA_DIR}"
+ln -sfn "${TEMP_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/temp_data.parquet"
+ln -sfn "${GREEDY_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/greedy_data.parquet"
 
 cd "${eval_path}"
 
@@ -184,6 +209,9 @@ echo "  基础模型:      $BASB_MODEL_NAME"
 echo "  跳过基础模型:  $SKIP_BASE_MODEL"
 echo "  温度:          $TEMPERATURE"
 echo "  采样比例:      $SAMPLE_RATIO"
+echo "  temp_data 文件: $TEMP_DATA_FILE"
+echo "  greedy_data 文件: $GREEDY_DATA_FILE"
+echo "  评测数据目录:  $CUSTOM_EVAL_DATA_DIR"
 echo "  结果保存目录:  $eval_saved_path_dir"
 echo "=============================================="
 echo ""
@@ -197,11 +225,11 @@ TASKS=(
     "greedy_data"
 )
 
-ADDITIONAL_EVAL_DATASETS=(
-    "eval_bbeh_step.py"
-    "eval_mmlupro_step.py"
-    "eval_supergpqa_step.py"
-)
+# ADDITIONAL_EVAL_DATASETS=(
+#     "eval_bbeh_step.py"
+#     "eval_mmlupro_step.py"
+#     "eval_supergpqa_step.py"
+# )
 
 # =============================================================================
 # GPU 初始化
@@ -276,13 +304,20 @@ for step in $STEPS; do
     step_path="${CKPTS_DIR}/global_step_${step}/actor/huggingface"
     
     if [ -d "$step_path" ]; then
-        # 验证 checkpoint 完整性（检查是否有模型文件）
-        if ls "${step_path}"/*.safetensors >/dev/null 2>&1 || ls "${step_path}"/*.bin >/dev/null 2>&1; then
-        model_list+=("$step_name")
-        model_paths+=("$step_path")
+        # 验证 checkpoint 完整性（检查是否有 HF 推理权重）
+        if ls "${step_path}"/*.safetensors >/dev/null 2>&1 || \
+           ls "${step_path}"/*.bin >/dev/null 2>&1 || \
+           [ -f "${step_path}/model.safetensors.index.json" ] || \
+           [ -f "${step_path}/pytorch_model.bin.index.json" ]; then
+            model_list+=("$step_name")
+            model_paths+=("$step_path")
             echo "✓ 添加 checkpoint: $step_name -> $step_path"
             valid_steps=$((valid_steps + 1))
-    else
+        elif ls "${CKPTS_DIR}/global_step_${step}/actor"/model_world_size_*_rank_*.pt >/dev/null 2>&1; then
+            echo "✗ Warning: 检测到 FSDP shard checkpoint（model_world_size_*_rank_*.pt），但未检测到 HF 权重: $step_path"
+            echo "           请先将 global_step_${step}/actor 合并导出为 HuggingFace 权重，再执行评测。"
+            invalid_steps=$((invalid_steps + 1))
+        else
             echo "✗ Warning: Checkpoint 不完整 (无模型文件): $step_path"
             invalid_steps=$((invalid_steps + 1))
         fi
@@ -469,7 +504,7 @@ start_math_task_job() {
         --save_path_dir "${target_save_dir}" \
         --n_samples "${n_samples}" \
         --temperature "${temp}" \
-        --data_path_dir "${data_dir}" \
+        --data_path_dir "${CUSTOM_EVAL_DATA_DIR}" \
         ${step_arg} &
     local pid=$!
     
@@ -646,96 +681,96 @@ check_completed_jobs() {
 }
 
 # =============================================================================
-# 主执行循环 - 额外评测数据集
+# 主执行循环 - 额外评测数据集（已禁用，仅保留数学评测）
 # =============================================================================
 
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting additional evaluation datasets"
-
-declare -a task_queue=()
-
-for i in "${!model_list[@]}"; do
-    model_name="${model_list[$i]}"
-    model_path="${model_paths[$i]}"
-    
-    if [ ! -d "$model_path" ]; then
-        echo "Warning: Model path does not exist: $model_path, skipping..."
-        continue
-    fi
-    
-    for eval_script in "${ADDITIONAL_EVAL_DATASETS[@]}"; do
-        if check_dataset_completed "$model_name" "$eval_script"; then
-            continue
-        fi
-        task_queue+=("${model_name}|${model_path}|${eval_script}")
-    done
-done
-
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Additional eval task queue: ${#task_queue[@]} tasks"
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Task queue details:"
-for i in "${!task_queue[@]}"; do
-    echo "  [$i] ${task_queue[$i]}"
-done
-
-# 如果没有任务，跳过此循环
-if [ ${#task_queue[@]} -eq 0 ]; then
-    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] No additional eval tasks to run"
-else
-
-cleanup_counter=0
-task_index=0
-
-while [ $task_index -lt ${#task_queue[@]} ] || [ ${#pids[@]} -gt 0 ]; do
-    # 定期综合清理
-    cleanup_counter=$((cleanup_counter + 1))
-    if [ $((cleanup_counter % 10)) -eq 0 ]; then
-        comprehensive_cleanup
-    else
-        cleanup_zombie_processes
-    fi
-    
-    check_completed_jobs
-    available_gpus=($(get_available_gpus))
-    
-    while [ $task_index -lt ${#task_queue[@]} ] && [ ${#available_gpus[@]} -ge 1 ]; do
-        task="${task_queue[$task_index]}"
-        IFS='|' read -r model_name model_path eval_script <<< "$task"
-        
-        if check_dataset_completed "$model_name" "$eval_script"; then
-            echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] already completed"
-            task_index=$((task_index + 1))
-            continue
-        fi
-        
-        if [[ "${available_gpus[0]}" =~ ^[0-9]+$ ]]; then
-            if start_additional_eval_job "${available_gpus[0]}" "$model_path" "$model_name" "$eval_script"; then
-                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [START] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] on GPU ${available_gpus[0]}"
-                task_index=$((task_index + 1))
-                available_gpus=($(get_available_gpus))
-            else
-                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [RETRY] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] failed to start, will retry"
-                break
-            fi
-        else
-            echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Invalid GPU ID, skipping task $((task_index + 1))/${#task_queue[@]}"
-            task_index=$((task_index + 1))
-        fi
-    done
-    
-    if [ ${#pids[@]} -gt 0 ] || [ $task_index -lt ${#task_queue[@]} ]; then
-        completed=$((task_index - ${#pids[@]}))
-        total_tasks=${#task_queue[@]}
-        progress=0
-        if [ $total_tasks -gt 0 ]; then
-            progress=$((completed * 100 / total_tasks))
-        fi
-        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [STATUS] Additional eval: Running ${#pids[@]} jobs, Completed ${completed}/${total_tasks} (${progress}%), Pending $((total_tasks - task_index))"
-        sleep 30
-    fi
-done
-
-fi  # 结束 task_queue 非空检查
-
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All additional evaluations completed! (${#task_queue[@]} tasks)"
+# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting additional evaluation datasets"
+#
+# declare -a task_queue=()
+#
+# for i in "${!model_list[@]}"; do
+#     model_name="${model_list[$i]}"
+#     model_path="${model_paths[$i]}"
+#
+#     if [ ! -d "$model_path" ]; then
+#         echo "Warning: Model path does not exist: $model_path, skipping..."
+#         continue
+#     fi
+#
+#     for eval_script in "${ADDITIONAL_EVAL_DATASETS[@]}"; do
+#         if check_dataset_completed "$model_name" "$eval_script"; then
+#             continue
+#         fi
+#         task_queue+=("${model_name}|${model_path}|${eval_script}")
+#     done
+# done
+#
+# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Additional eval task queue: ${#task_queue[@]} tasks"
+# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Task queue details:"
+# for i in "${!task_queue[@]}"; do
+#     echo "  [$i] ${task_queue[$i]}"
+# done
+#
+# # 如果没有任务，跳过此循环
+# if [ ${#task_queue[@]} -eq 0 ]; then
+#     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] No additional eval tasks to run"
+# else
+#
+# cleanup_counter=0
+# task_index=0
+#
+# while [ $task_index -lt ${#task_queue[@]} ] || [ ${#pids[@]} -gt 0 ]; do
+#     # 定期综合清理
+#     cleanup_counter=$((cleanup_counter + 1))
+#     if [ $((cleanup_counter % 10)) -eq 0 ]; then
+#         comprehensive_cleanup
+#     else
+#         cleanup_zombie_processes
+#     fi
+#
+#     check_completed_jobs
+#     available_gpus=($(get_available_gpus))
+#
+#     while [ $task_index -lt ${#task_queue[@]} ] && [ ${#available_gpus[@]} -ge 1 ]; do
+#         task="${task_queue[$task_index]}"
+#         IFS='|' read -r model_name model_path eval_script <<< "$task"
+#
+#         if check_dataset_completed "$model_name" "$eval_script"; then
+#             echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] already completed"
+#             task_index=$((task_index + 1))
+#             continue
+#         fi
+#
+#         if [[ "${available_gpus[0]}" =~ ^[0-9]+$ ]]; then
+#             if start_additional_eval_job "${available_gpus[0]}" "$model_path" "$model_name" "$eval_script"; then
+#                 echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [START] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] on GPU ${available_gpus[0]}"
+#                 task_index=$((task_index + 1))
+#                 available_gpus=($(get_available_gpus))
+#             else
+#                 echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [RETRY] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] failed to start, will retry"
+#                 break
+#             fi
+#         else
+#             echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Invalid GPU ID, skipping task $((task_index + 1))/${#task_queue[@]}"
+#             task_index=$((task_index + 1))
+#         fi
+#     done
+#
+#     if [ ${#pids[@]} -gt 0 ] || [ $task_index -lt ${#task_queue[@]} ]; then
+#         completed=$((task_index - ${#pids[@]}))
+#         total_tasks=${#task_queue[@]}
+#         progress=0
+#         if [ $total_tasks -gt 0 ]; then
+#             progress=$((completed * 100 / total_tasks))
+#         fi
+#         echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [STATUS] Additional eval: Running ${#pids[@]} jobs, Completed ${completed}/${total_tasks} (${progress}%), Pending $((total_tasks - task_index))"
+#         sleep 30
+#     fi
+# done
+#
+# fi  # 结束 task_queue 非空检查
+#
+# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All additional evaluations completed! (${#task_queue[@]} tasks)"
 
 # =============================================================================
 # 重置状态

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -29,6 +30,13 @@ def teacher_env() -> Dict[str, str]:
         "base_url": os.environ.get("SKILLRL_TEACHER_BASE_URL", "").strip().rstrip("/"),
         "api_key": os.environ.get("SKILLRL_TEACHER_API_KEY", "").strip(),
         "model": os.environ.get("SKILLRL_TEACHER_MODEL", "").strip(),
+        "rollout_urls": os.environ.get("SE_ROLLOUT_SERVER_URLS", "").strip(),
+        "rollout_base_port": os.environ.get("SE_ROLLOUT_BASE_PORT", "").strip(),
+        "rollout_n_servers": (
+            os.environ.get("SE_ROLLOUT_N_SERVERS", "").strip()
+            or os.environ.get("SE_N_GPUS", "").strip()
+        ),
+        "rollout_host": os.environ.get("SE_ROLLOUT_HOST", "").strip() or "127.0.0.1",
     }
 
 
@@ -68,6 +76,73 @@ def chat_complete(
     return content if isinstance(content, str) else str(content)
 
 
+def _messages_to_prompt(messages: List[Dict[str, str]]) -> str:
+    parts: List[str] = []
+    for m in messages:
+        role = str(m.get("role", "user")).upper()
+        content = str(m.get("content", "")).strip()
+        if content:
+            parts.append(f"[{role}]\n{content}")
+    parts.append("[ASSISTANT]\n")
+    return "\n\n".join(parts)
+
+
+def _rollout_urls_from_env_or_args(args: argparse.Namespace, env: Dict[str, str]) -> List[str]:
+    raw = (args.rollout_server_urls or env["rollout_urls"]).strip()
+    if raw:
+        return [u.strip().rstrip("/") for u in raw.replace(",", " ").split() if u.strip()]
+    base_port = (args.rollout_base_port or env["rollout_base_port"]).strip()
+    n_servers = (args.rollout_n_servers or env["rollout_n_servers"]).strip()
+    host = (args.rollout_host or env["rollout_host"]).strip() or "127.0.0.1"
+    if not base_port or not n_servers:
+        return []
+    try:
+        base = int(base_port)
+        n = int(n_servers)
+    except ValueError:
+        return []
+    if n <= 0:
+        return []
+    return [f"http://{host}:{base + i}" for i in range(n)]
+
+
+def rollout_complete(
+    messages: List[Dict[str, str]],
+    *,
+    server_urls: List[str],
+    timeout: float = 600.0,
+    temperature: float = 0.2,
+    max_tokens: int = 8192,
+    top_p: float = 0.95,
+    top_k: int = 50,
+) -> str:
+    if not server_urls:
+        raise ValueError("rollout server_urls is empty")
+    base_url = random.choice(server_urls).rstrip("/")
+    prompt = _messages_to_prompt(messages)
+    payload: Dict[str, Any] = {
+        "data_records": [{"prompt": prompt, "question": "skill_distill", "gt": "0"}],
+        "num_questions": 1,
+        "suffix": "skillrl_distill",
+        "rollout_n": 1,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+    }
+    with httpx.Client(timeout=timeout) as client:
+        r = client.post(f"{base_url}/rollout", json=payload)
+        r.raise_for_status()
+        data = r.json()
+    results = data.get("results") or []
+    if not results:
+        raise RuntimeError(f"No results in rollout response: {data.keys()}")
+    responses = (results[0] or {}).get("responses") or []
+    if not responses:
+        raise RuntimeError("No responses in rollout result")
+    return str(responses[0])
+
+
 def format_trajectory_block(rows: List[Dict[str, Any]], max_chars: int) -> str:
     parts: List[str] = []
     total = 0
@@ -102,16 +177,37 @@ def load_trajectories(path: str) -> List[Dict[str, Any]]:
 
 def run_distill(args: argparse.Namespace) -> int:
     env = teacher_env()
+    teacher_backend = (args.teacher_backend or "").strip().lower() or "auto"
     base_url = (args.teacher_base_url or env["base_url"]).strip().rstrip("/")
     api_key = args.teacher_api_key or env["api_key"]
     model = (args.teacher_model or env["model"]).strip()
-    if not base_url or not model:
+    rollout_urls = _rollout_urls_from_env_or_args(args, env)
+    if teacher_backend not in {"auto", "chat", "rollout"}:
+        print(f"[distill] 非法 --teacher-backend: {teacher_backend}", file=sys.stderr)
+        return 2
+    if teacher_backend == "auto":
+        use_rollout = bool(rollout_urls) and not (base_url and model)
+    elif teacher_backend == "rollout":
+        use_rollout = True
+    else:
+        use_rollout = False
+
+    if use_rollout and not rollout_urls:
+        print(
+            "[distill] rollout 模式需要 SE_ROLLOUT_SERVER_URLS，或 "
+            "SE_ROLLOUT_BASE_PORT + SE_ROLLOUT_N_SERVERS/SE_N_GPUS",
+            file=sys.stderr,
+        )
+        return 2
+    if (not use_rollout) and (not base_url or not model):
         print(
             "[distill] 需要 SKILLRL_TEACHER_BASE_URL 与 SKILLRL_TEACHER_MODEL "
             "（或命令行 --teacher-base-url / --teacher-model）",
             file=sys.stderr,
         )
         return 2
+    mode_name = "rollout" if use_rollout else "chat"
+    print(f"[distill] teacher backend={mode_name}", file=sys.stderr)
 
     rows = load_trajectories(args.trajectories)
     by_topic: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -156,15 +252,26 @@ def run_distill(args: argparse.Namespace) -> int:
                 {"role": "user", "content": user},
             ]
             try:
-                raw = chat_complete(
-                    messages,
-                    base_url=base_url,
-                    api_key=api_key,
-                    model=model,
-                    timeout=args.timeout,
-                    temperature=args.temperature,
-                    max_tokens=args.max_tokens,
-                )
+                if use_rollout:
+                    raw = rollout_complete(
+                        messages,
+                        server_urls=rollout_urls,
+                        timeout=args.timeout,
+                        temperature=args.temperature,
+                        max_tokens=args.max_tokens,
+                        top_p=args.top_p,
+                        top_k=args.top_k,
+                    )
+                else:
+                    raw = chat_complete(
+                        messages,
+                        base_url=base_url,
+                        api_key=api_key,
+                        model=model,
+                        timeout=args.timeout,
+                        temperature=args.temperature,
+                        max_tokens=args.max_tokens,
+                    )
             except Exception as e:
                 print(f"[distill] teacher error topic={tkey} batch={batch_num}: {e}", file=sys.stderr)
                 batch_num += 1
@@ -205,8 +312,15 @@ def build_distill_parser(sub: Any) -> None:
     p.add_argument("--teacher-base-url", default="")
     p.add_argument("--teacher-api-key", default="")
     p.add_argument("--teacher-model", default="")
+    p.add_argument("--teacher-backend", default="auto", choices=["auto", "chat", "rollout"])
+    p.add_argument("--rollout-server-urls", default="", help="Space/comma separated, e.g. http://127.0.0.1:8760,http://127.0.0.1:8761")
+    p.add_argument("--rollout-host", default="")
+    p.add_argument("--rollout-base-port", default="")
+    p.add_argument("--rollout-n-servers", default="")
     p.add_argument("--timeout", type=float, default=600.0)
     p.add_argument("--temperature", type=float, default=0.2)
+    p.add_argument("--top-p", type=float, default=0.95)
+    p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--max-tokens", type=int, default=8192)
     p.set_defaults(_run=run_distill)
 

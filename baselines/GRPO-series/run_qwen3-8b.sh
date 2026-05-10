@@ -6,7 +6,7 @@
 #   ./run_qwen3-8b.sh trainer.total_training_steps=10
 
 set -x
-CUDA_VISIBLE_DEVICES=4,5,6,7
+CUDA_VISIBLE_DEVICES=0,1,2,3
 export CUDA_VISIBLE_DEVICES
 
 # =============================================================================
@@ -108,5 +108,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node="${N_GPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
     trainer.save_freq="${SAVE_FREQ}" \
-    trainer.test_freq="${TEST_FREQ}" \
+    trainer.test_freq=-1 \
     trainer.total_epochs="${TOTAL_EPOCHS}" "$@"

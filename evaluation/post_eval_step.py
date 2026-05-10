@@ -18,6 +18,7 @@ ANSWER_PATTERN_BOXED = r"(?i)\\boxed\s*{([^\n]+)}"
 
 api_urls=['https://fast.ominiai.cn/v1/chat/completions']
 api_keys=['sk-Lplron1sCtErNjSaUDxhgwFuwCyjGKfwJpa9cwFNXcJsMNyB']
+ENABLE_API_CHECK = False
 
 def clear_model_memory():
     """清理 GPU 显存"""
@@ -89,6 +90,8 @@ def compute_score(response: str, gts: list):
     check_type = "not checked"
     
     if pred is None:
+        if not ENABLE_API_CHECK:
+            return rule_correct, check_correct, is_check, str(pred), check_rsp, error, check_type
         is_check = True
         for gt in gts:
             check_type = "rsp_check"
@@ -110,7 +113,10 @@ def compute_score(response: str, gts: list):
             rule_correct = True
             check_correct = True
             break
-        
+
+        if not ENABLE_API_CHECK:
+            continue
+
         check_type = "pred_check"
         try:
             check_rsp, error = process_example(str(pred), str(gt))
@@ -233,6 +239,7 @@ def post_eval(save_path_dir, dataset_name, model_name, n_samples, temperature, s
     print(f"  Step: {step if step else 'N/A'}")
     print(f"  采样数: {n_samples}")
     print(f"  温度: {temperature}")
+    print(f"  外部API校验: {'开启' if ENABLE_API_CHECK else '关闭'}")
     print("=" * 60)
     
     save_path = os.path.join(result_dir, f'{dataset_name}_responses.parquet')
@@ -325,6 +332,9 @@ if __name__ == "__main__":
                         help="每个问题的采样数")
     parser.add_argument("--temperature", type=float, default=0.6,
                         help="采样温度")
+    parser.add_argument("--enable_api_check", action="store_true",
+                        help="启用外部 API 进行额外答案校验（默认关闭，仅规则判分）")
     
     args = parser.parse_args()
+    ENABLE_API_CHECK = args.enable_api_check
     post_eval(args.save_path_dir, args.dataset, args.model_name, args.n_samples, args.temperature, args.step)
