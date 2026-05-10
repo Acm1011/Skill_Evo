@@ -1,9 +1,18 @@
-You distill reusable math reasoning skills from student solution attempts.
+You distill reusable problem-solving skills from student solution attempts.
 
 TOPIC_BUCKET (for task-specific skills only): {topic_bucket}
 
-TRAJECTORIES (each block is one problem; correctness may be unknown):
-{trajectories_block}
+SUCCESSFUL TRAJECTORIES (sampled):
+{success_trajectories_block}
+
+FAILED / WEAK TRAJECTORIES (sampled):
+{failure_trajectories_block}
+
+SUCCESS PATTERNS (structured summary):
+{success_patterns}
+
+FAILURE PATTERNS (structured summary):
+{failure_patterns}
 
 Output ONE JSON object and nothing else (no markdown fences). Schema:
 {{
@@ -19,8 +28,8 @@ Output ONE JSON object and nothing else (no markdown fences). Schema:
 }}
 
 Rules:
-- general_skills: strategies that help on many math problems, not tied to {topic_bucket} only.
+- general_skills: strategies that help on many problem-solving tasks, not tied to {topic_bucket} only.
 - task_specific_skills: tactics typical for problems like those in TOPIC_BUCKET (use the given topic context).
-- common_mistakes: infer from incorrect or weak reasoning in the trajectories; if all correct, output [].
+- common_mistakes: extract from failure/weak patterns and contrast with successful patterns; if no failures are provided, output [].
 - Do NOT include skill_id fields; do NOT copy long problem-specific numbers into principles—stay generic.
 - Keep each list concise (e.g. at most 5 items per list) for this batch.

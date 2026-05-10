@@ -164,6 +164,59 @@ def format_trajectory_block(rows: List[Dict[str, Any]], max_chars: int) -> str:
     return "\n".join(parts)
 
 
+def split_success_failure(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    buckets: Dict[str, List[Dict[str, Any]]] = {"success": [], "failure": [], "unknown": []}
+    for row in rows:
+        ic = row.get("is_correct")
+        if ic is True:
+            buckets["success"].append(row)
+        elif ic is False:
+            buckets["failure"].append(row)
+        else:
+            buckets["unknown"].append(row)
+    return buckets
+
+
+def _shorten(text: Any, limit: int = 280) -> str:
+    s = str(text or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 3)] + "..."
+
+
+def extract_patterns(rows: List[Dict[str, Any]], *, limit: int = 10) -> str:
+    patterns: List[Dict[str, Any]] = []
+    for row in rows[:limit]:
+        patterns.append(
+            {
+                "problem": _shorten(row.get("problem", ""), 320),
+                "response_excerpt": _shorten(row.get("student_response", ""), 420),
+                "topic": str(row.get("topic") or row.get("topic_key") or "unknown"),
+                "is_correct": row.get("is_correct"),
+                "difficulty": row.get("difficulty"),
+            }
+        )
+    return json.dumps(patterns, ensure_ascii=False, indent=2)
+
+
+def build_success_failure_block(
+    success_rows: List[Dict[str, Any]],
+    failure_rows: List[Dict[str, Any]],
+    *,
+    max_chars: int,
+) -> Dict[str, str]:
+    success_block = format_trajectory_block(success_rows, max_chars=max_chars // 2)
+    failure_block = format_trajectory_block(failure_rows, max_chars=max_chars // 2)
+    success_patterns = extract_patterns(success_rows, limit=10)
+    failure_patterns = extract_patterns(failure_rows, limit=10) if failure_rows else "[]"
+    return {
+        "success_trajectories_block": success_block,
+        "failure_trajectories_block": failure_block,
+        "success_patterns": success_patterns,
+        "failure_patterns": failure_patterns,
+    }
+
+
 def load_trajectories(path: str) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     with open(path, "r", encoding="utf-8") as f:
@@ -173,6 +226,19 @@ def load_trajectories(path: str) -> List[Dict[str, Any]]:
                 continue
             rows.append(json.loads(line))
     return rows
+
+
+def topic_bucket_level3(row: Dict[str, Any]) -> str:
+    """Use first 3 levels of topic path as distill bucket key."""
+    topic = row.get("topic")
+    if isinstance(topic, str) and topic.strip():
+        parts = [p.strip() for p in topic.split("->") if p.strip()]
+        if parts:
+            return topic_slug(" -> ".join(parts[:3]))
+    tk = row.get("topic_key")
+    if isinstance(tk, str) and tk.strip():
+        return tk.strip()
+    return topic_slug(row.get("topic"))
 
 
 def run_distill(args: argparse.Namespace) -> int:
@@ -212,7 +278,7 @@ def run_distill(args: argparse.Namespace) -> int:
     rows = load_trajectories(args.trajectories)
     by_topic: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        tk = row.get("topic_key") or topic_slug(row.get("topic"))
+        tk = topic_bucket_level3(row)
         by_topic[tk].append(row)
 
     bank = LayeredSkillBank(empty_bank())
@@ -224,26 +290,63 @@ def run_distill(args: argparse.Namespace) -> int:
     topic_keys = sorted(by_topic.keys(), key=lambda k: (-len(by_topic[k]), k))
     for tkey in topic_keys:
         bucket_rows = by_topic[tkey]
+        sf = split_success_failure(bucket_rows)
+        success_rows = sf["success"]
+        failure_rows = sf["failure"] + sf["unknown"]
         # chunk bucket
-        i = 0
+        succ_i = 0
+        fail_i = 0
         batch_num = 0
-        while i < len(bucket_rows):
-            chunk: List[Dict[str, Any]] = []
+        while succ_i < len(success_rows) or fail_i < len(failure_rows):
+            succ_chunk: List[Dict[str, Any]] = []
+            fail_chunk: List[Dict[str, Any]] = []
             char_budget = 0
-            while i < len(bucket_rows) and len(chunk) < args.max_problems_per_call:
-                r = bucket_rows[i]
+            max_per_side = max(1, args.max_problems_per_call // 2)
+            while (
+                succ_i < len(success_rows)
+                and len(succ_chunk) < max_per_side
+                and len(succ_chunk) + len(fail_chunk) < args.max_problems_per_call
+            ):
+                r = success_rows[succ_i]
                 est = len(str(r.get("problem", ""))) + len(str(r.get("student_response", ""))) + 100
-                if chunk and char_budget + est > args.max_chars_per_call:
+                if (succ_chunk or fail_chunk) and char_budget + est > args.max_chars_per_call:
                     break
-                chunk.append(r)
+                succ_chunk.append(r)
                 char_budget += est
-                i += 1
-            if not chunk:
-                i += 1
+                succ_i += 1
+            while (
+                fail_i < len(failure_rows)
+                and len(fail_chunk) < max_per_side
+                and len(succ_chunk) + len(fail_chunk) < args.max_problems_per_call
+            ):
+                r = failure_rows[fail_i]
+                est = len(str(r.get("problem", ""))) + len(str(r.get("student_response", ""))) + 100
+                if (succ_chunk or fail_chunk) and char_budget + est > args.max_chars_per_call:
+                    break
+                fail_chunk.append(r)
+                char_budget += est
+                fail_i += 1
+            if not succ_chunk and succ_i < len(success_rows):
+                succ_chunk.append(success_rows[succ_i])
+                succ_i += 1
+            if not fail_chunk and fail_i < len(failure_rows) and len(succ_chunk) < args.max_problems_per_call:
+                fail_chunk.append(failure_rows[fail_i])
+                fail_i += 1
+            if not succ_chunk and not fail_chunk:
                 continue
 
-            traj_block = format_trajectory_block(chunk, args.max_chars_per_call)
-            user = template.format(topic_bucket=tkey, trajectories_block=traj_block)
+            blocks = build_success_failure_block(
+                succ_chunk,
+                fail_chunk,
+                max_chars=args.max_chars_per_call,
+            )
+            user = template.format(
+                topic_bucket=tkey,
+                success_trajectories_block=blocks["success_trajectories_block"],
+                failure_trajectories_block=blocks["failure_trajectories_block"],
+                success_patterns=blocks["success_patterns"],
+                failure_patterns=blocks["failure_patterns"],
+            )
             messages = [
                 {
                     "role": "system",

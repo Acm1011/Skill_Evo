@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
-# 训练入口：Synthesizer → memory(after_sync) → Solver → memory(after_solver)，按 V1..Vn 展开（n = skill_evo_num_rounds）。
+# 训练入口（无 Synthesizer 训练版）：Synthesizer(reward-only) → memory(after_sync) → Solver → memory(after_solver)，按 V1..Vn 展开（n = skill_evo_num_rounds）。
 # SE_RESUME=1|true|yes：若已有对应当前步数的 Synthesizer/Solver checkpoint 与 memory 产物，则跳过该子步骤。
 #  Synthesizer：若已有 global_step_* 最终 ckpt 则整段不跑；若无 ckpt 但 Synthesizer/<Vn>/merged/train_data.parquet（或
 #  train_data.jsonl）已存在，则仅跳过 offline（由 SE_SYNTH_SKIP_OFFLINE=1 传入 Synthesizer.sh），仍跑 reward+RL。缺 memory
 #  仍跑 after_sync/after_solver。续训步数须与已存在 ckpt 步数一致时 skip 最可靠。Synthesizer 内 verl 为 resume_mode=auto。
-# SE_SYNTH_RUNNER_MODE=train|reward_only：
-#  train（默认）走 Synthesizer.sh；
-#  reward_only 走 Synthesizer_reward_only.sh（用于“只产 reward 初始化 utility、不做有效 Synth 训练”）。
 
 set -xeuo pipefail
 # 获取脚本所在目录
@@ -67,14 +64,6 @@ export SE_DATA_FILE="${data_file}"
 # 通用：代码模块
 # =============================================================================
 export SE_CODE_MODULE="${SE_CODE_MODULE:-skill_src}"
-SE_SYNTH_RUNNER_MODE="${SE_SYNTH_RUNNER_MODE:-train}"
-export SE_SYNTH_RUNNER_MODE
-if [[ "${SE_SYNTH_RUNNER_MODE}" == "reward_only" ]]; then
-    synth_runner_script="${SCRIPT_DIR}/Synthesizer_reward_only.sh"
-else
-    synth_runner_script="${SCRIPT_DIR}/Synthesizer.sh"
-fi
-export synth_runner_script
 
 # =============================================================================
 # GPU 拓扑（Synthesizer.sh 需要 SE_N_GPUS / SE_GPU_IDS；请与 retriever 用卡错开避免争用）
@@ -201,11 +190,19 @@ se_resume_is_true() {
     esac
 }
 
-# 若已存在则跳过后续 Synthesizer（含 offline + RL）
+# 该轮 Synthesizer reward 已产出（用于 after_sync 初始化 utility）
+se_synth_reward_ready() {
+    local ev="$1"
+    local d="${synthesizer_path_dir}/${ev}/reward_info"
+    ls "${d}"/exp_data_step_*.jsonl >/dev/null 2>&1
+}
+
+# 若已存在可用 reward 或 memory 产物则跳过本轮 Synthesizer(reward-only)
 se_resume_skip_synth() {
     local ev="$1"
     se_resume_is_true || return 1
-    [ -d "${synthesizer_path_dir}/${ev}/ckpts/global_step_${prev_synth_ckpt_step}/actor/huggingface" ]
+    local n="${ev#V}"
+    se_synth_reward_ready "${ev}" || [ -f "${memory_path_dir}/memory_after_syn_v${n}.jsonl" ]
 }
 
 # 该轮 Synthesizer 的 offline 已产出合并训练数据（无最终 ckpt 时用于跳过 offline、仅跑 RL）
@@ -346,7 +343,6 @@ main_o_write_experiment_config() {
             base_model_name base_model_path data_name data_file \
             project_name exp_name variant WORKING_DIR \
             saved_results_dir SE_SAVED_RESULTS_DIR SE_SKILL_SAVED_ROOT \
-            SE_SYNTH_RUNNER_MODE synth_runner_script \
             synthesizer_path_dir SYNTHESIZER_PATH_DIR SE_Synthsizer_DIR \
             solver_path_dir SOLVER_PATH_DIR SE_SOLVER_DIR \
             memory_path_dir MEMORY_PATH_DIR \
@@ -396,11 +392,10 @@ cd ${WORKING_DIR}
 echo "实验参数已写入: ${saved_results_dir}/experiment_config.txt"
 echo "========== 训练调度: 共 ${skill_evo_num_rounds} 轮 Syn↔Solver 进化 (V1..V${skill_evo_num_rounds}) =========="
 if se_resume_is_true; then
-    echo "[resume] SE_RESUME=true：已有 ckpt/Memory 的环节会跳过；无 Synthesizer 最终 ckpt 但已有 merged/train_data 时只跳过 offline；verl 仍可用 resume_mode=auto 续步"
+    echo "[resume] SE_RESUME=true：已有 reward/Memory/Solver ckpt 的环节会跳过；Synthesizer 使用 reward-only 版本"
 else
-    echo "（非 resume 全流程跑；Synthesizer 内 resume_mode=auto 时亦会从 ckpt 续训；此时不会因 merged 而跳过 offline）"
+    echo "（非 resume 全流程跑；Synthesizer 使用 reward-only 版本）"
 fi
-echo "[synth-runner] mode=${SE_SYNTH_RUNNER_MODE}, script=${synth_runner_script}"
 
 for iter in $(seq 1 "${skill_evo_num_rounds}"); do
     exp_version="V${iter}"
@@ -413,14 +408,7 @@ for iter in $(seq 1 "${skill_evo_num_rounds}"); do
         prev_synthesizer_model_path="${base_model_path}"
         prev_solver_model_path="${base_model_path}"
     else
-        if [[ "${SE_SYNTH_RUNNER_MODE}" == "reward_only" ]]; then
-            prev_synthesizer_model_path="${base_model_path}"
-        else
-            prev_synthesizer_model_path="$(resolve_prev_ckpt_hf_dir "${synthesizer_path_dir}" "V$((iter - 1))" "${prev_synth_ckpt_step}")" || {
-                echo "Error: 未找到上一轮 Synthesizer checkpoint: ${synthesizer_path_dir}/V$((iter - 1))/ckpts/global_step_*/actor/huggingface" >&2
-                exit 1
-            }
-        fi
+        prev_synthesizer_model_path="${base_model_path}"
         prev_solver_model_path="$(resolve_prev_ckpt_hf_dir "${solver_path_dir}" "V$((iter - 1))" "${prev_solver_ckpt_step}")" || {
             echo "Error: 未找到上一轮 Solver checkpoint: ${solver_path_dir}/V$((iter - 1))/ckpts/global_step_*/actor/huggingface" >&2
             exit 1
@@ -428,21 +416,21 @@ for iter in $(seq 1 "${skill_evo_num_rounds}"); do
     fi
 
     if se_resume_skip_synth "${exp_version}"; then
-        echo "[resume] 跳过 Synthesizer ${exp_version}（已有 .../ckpts/global_step_${prev_synth_ckpt_step}/actor/huggingface）"
+        echo "[resume] 跳过 Synthesizer(reward-only) ${exp_version}（已有 reward_info 或 memory_after_syn）"
     elif se_resume_is_true && se_synth_merged_train_ready "${exp_version}"; then
-        echo "[resume] Synthesizer ${exp_version}：已有 merged 训练数据，跳过 offline（SE_SYNTH_SKIP_OFFLINE=1）"
-        SE_SYNTH_SKIP_OFFLINE=1 bash "${synth_runner_script}" \
+        echo "[resume] Synthesizer(reward-only) ${exp_version}：已有 merged 训练数据，跳过 offline、仅跑 reward-only（SE_SYNTH_SKIP_OFFLINE=1）"
+        SE_SYNTH_SKIP_OFFLINE=1 bash "${SCRIPT_DIR}/Synthesizer_reward_only.sh" \
             "${exp_version}" "${prev_synthesizer_model_path}" \
             "${prev_solver_model_path}" "${synthesizer_training_steps}" "${data_file}" || {
-            echo "Error: Synthesizer ${exp_version} 训练失败" >&2
+            echo "Error: Synthesizer(reward-only) ${exp_version} 执行失败" >&2
             exit 1
         }
     else
-        echo "执行 Synthesizer (${exp_name} ${exp_version})..."
-        bash "${synth_runner_script}" \
+        echo "执行 Synthesizer(reward-only) (${exp_name} ${exp_version})..."
+        bash "${SCRIPT_DIR}/Synthesizer_reward_only.sh" \
             "${exp_version}" "${prev_synthesizer_model_path}" \
             "${prev_solver_model_path}" "${synthesizer_training_steps}" "${data_file}" || {
-            echo "Error: Synthesizer ${exp_version} 训练失败" >&2
+            echo "Error: Synthesizer(reward-only) ${exp_version} 执行失败" >&2
             exit 1
         }
     fi
