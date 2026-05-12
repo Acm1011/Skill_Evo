@@ -49,7 +49,7 @@ USAGE
 
 MODEL="../models/Qwen3-4B-Instruct-2507"
 TRAJ_PATH="${REPO_ROOT}/baselines/SkillRL/outputs/trajectories_from_merged_v1_v2.jsonl"
-SAMPLE_K="500"
+SAMPLE_K="0"
 OUT_PATH="${REPO_ROOT}/baselines/SkillRL/outputs/skills_from_rollout_teacher.json"
 RAW_DUMP_DIR="${REPO_ROOT}/baselines/SkillRL/outputs/distill_raw"
 ROLLOUT_LOG_DIR="${REPO_ROOT}/baselines/SkillRL/outputs/logs/rollout_servers"
@@ -66,8 +66,8 @@ TIMEOUT="600"
 ROLLOUT_START_SCRIPT="${REPO_ROOT}/skill_src/Zero/start_rollout_servers.sh"
 SE_ROLLOUT_HOST="127.0.0.1"
 SE_ROLLOUT_BASE_PORT="8760"
-SE_GPU_IDS="4,5,6"
-SE_N_GPUS="3"
+SE_GPU_IDS="4,5,6,7"
+SE_N_GPUS="4"
 SE_ROLLOUT_N_SERVERS=""
 
 while [[ $# -gt 0 ]]; do

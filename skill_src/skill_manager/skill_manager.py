@@ -594,12 +594,22 @@ class SkillManager:
     def skills_block_for_template(skills: list[SkillItem]) -> str:
         """将多条 skill 拼成 `skill_use_v1` 等模板里 `{skill}` 占位符的内容。
 
-        每条用 `to_json_dict` 再 `json.dumps`；多条之间以 ``\\n\\n---\\n\\n`` 分隔。
-        无检索结果时返回空串，避免占位误导模型。
+        仅向 solver 暴露 ``skill name`` / ``key insight`` / ``method`` 三个字段；
+        多条之间以 ``\\n\\n---\\n\\n`` 分隔。无检索结果时返回空串，避免占位误导模型。
         """
         if not skills:
             return ""
-        parts = [json.dumps(s.to_json_dict(), ensure_ascii=False) for s in skills]
+        parts = [
+            json.dumps(
+                {
+                    "skill name": s.skill_name,
+                    "key insight": s.key_insight,
+                    "method": s.method,
+                },
+                ensure_ascii=False,
+            )
+            for s in skills
+        ]
         return "\n\n---\n\n".join(parts)
 
     def skill_distill(self) -> list[SkillItem]:

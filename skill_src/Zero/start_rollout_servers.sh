@@ -59,7 +59,7 @@ MODEL="${MODEL_CLI:-${ROLLOUT_SERVER_MODEL:-${SE_ROLLOUT_MODEL:-}}}"
 BASE_PORT="${SE_ROLLOUT_BASE_PORT:-${ROLLOUT_BASE_PORT:-8760}}"
 N="${SE_N_GPUS:-}"
 IDS="${SE_GPU_IDS:-}"
-GPU_UTIL="${ROLLOUT_SERVER_GPU_UTIL:-0.95}"
+GPU_UTIL="${ROLLOUT_SERVER_GPU_UTIL:-0.7}"
 
 usage() {
     echo "用法: 在已设置 run_with_gpus.sh 导出的环境变量后执行"

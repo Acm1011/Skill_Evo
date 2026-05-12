@@ -35,15 +35,15 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 # 参数解析
 # =============================================================================
 
-EXP_NAME="${SB_EXP_NAME:-data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v1_with_skills}"
-CKPTS_DIR="${SB_CKPTS_DIR:-/home/ycy/sdi/skill_saved/Skill_Evo/data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v3/Solver/V1/ckpts}"
+EXP_NAME="${SB_EXP_NAME:-data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v1_skillrl}"
+CKPTS_DIR="${SB_CKPTS_DIR:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/skillrl_grpo_qwen3_4b}"
 STEPS="${SB_STEPS:-}"
 BASB_MODEL_NAME="${SB_MODEL_NAME:-Qwen3-4B-Instruct-2507}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 SAMPLE_RATIO="${SAMPLE_RATIO:-0.1}"
 SKIP_BASE_MODEL="${SKIP_BASE_MODEL:-false}"
-TEMP_DATA_FILE="${TEMP_DATA_FILE:-/home/ycy/sdi/Skill_Evo/data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v3/temp_data_skill.parquet}"
-GREEDY_DATA_FILE="${GREEDY_DATA_FILE:-/home/ycy/sdi/Skill_Evo/data_DeepMath-103K_model_Qwen3-4B-Instruct-2507_v3/greedy_data_skill.parquet}"
+TEMP_DATA_FILE="${TEMP_DATA_FILE:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/temp_data_skill.parquet}"
+GREEDY_DATA_FILE="${GREEDY_DATA_FILE:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/greedy_data_skill.parquet}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -265,9 +265,9 @@ done
 model_list=()
 model_paths=()
 
-# Base model 评测结果保存在全局目录（只评测一次，作为 step 0）
+# Base model 评测结果保存在 step_0 目录（只评测一次，作为 step 0）
 
-base_model_eval_results_dir=${save_path_dir}/${BASB_MODEL_NAME}
+base_model_eval_results_dir=${eval_saved_path_dir}/step_0
 base_model_path="${model_dir}/${BASB_MODEL_NAME}"
 BASE_MODEL_NEEDS_EVAL="false"
 
@@ -383,7 +383,7 @@ check_dataset_completed() {
         # 新目录结构: step_N/{dataset}_final_results.json
         result_file="${eval_saved_path_dir}/step_${step}/${dataset_name}_final_results.json"
     elif [ "$model_name" == "$BASB_MODEL_NAME" ]; then
-        # Base model 保存在全局目录
+        # Base model 统一保存在 step_0 目录
         result_file="${base_model_eval_results_dir}/${dataset_name}_final_results.json"
     else
         # 兼容旧目录结构
@@ -410,7 +410,7 @@ check_main_task_completed() {
         # 新目录结构: step_N/{dataset}_responses.parquet
         result_file="${eval_saved_path_dir}/step_${step}/${dataset}_responses.parquet"
     elif [ "$model_name" == "$BASB_MODEL_NAME" ]; then
-        # Base model 保存在全局目录
+        # Base model 统一保存在 step_0 目录
         result_file="${base_model_eval_results_dir}/${dataset}_responses.parquet"
     else
         # 兼容旧目录结构
@@ -439,8 +439,8 @@ start_additional_eval_job() {
     if [ -n "$step" ]; then
         step_arg="--step ${step}"
     elif [ "$model_name" == "$BASB_MODEL_NAME" ]; then
-        # Base model 保存在全局目录（不带 step 参数）
-        target_save_dir="${save_path_dir}"
+        # Base model 也按 step 目录组织，固定保存到 step_0
+        step_arg="--step 0"
     fi
     
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting evaluation [${eval_script}] for model [${model_name}] (step=${step:-base}) on GPU [${gpu_id}]"
@@ -484,8 +484,8 @@ start_math_task_job() {
     if [ -n "$step" ]; then
         step_arg="--step ${step}"
     elif [ "$model_name" == "$BASB_MODEL_NAME" ]; then
-        # Base model 保存在全局目录（不带 step 参数）
-        target_save_dir="${save_path_dir}"
+        # Base model 也按 step 目录组织，固定保存到 step_0
+        step_arg="--step 0"
     fi
     
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting math task [${dataset}] for model [${model_name}] (step=${step:-base}) on GPU [${gpu_id}]"
@@ -624,8 +624,8 @@ check_completed_jobs() {
                     if [ -n "$step" ]; then
                         step_arg="--step ${step}"
                     elif [ "$model_name" == "$BASB_MODEL_NAME" ]; then
-                        # Base model 保存在全局目录
-                        target_save_dir="${save_path_dir}"
+                        # Base model 也按 step 目录组织，固定保存到 step_0
+                        step_arg="--step 0"
                     fi
                     
                     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Running post_eval_step for [${model_name}] (step=${step:-base}) on dataset [${dataset}]..."
@@ -881,17 +881,9 @@ echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All math tasks completed! ($
 
 echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Aggregating evaluation results..."
 
-# 确定 base model 的评测结果目录（作为 step 0）
-base_model_arg=""
-if [ "$SKIP_BASE_MODEL" != "true" ] && [ -d "${base_model_eval_results_dir}" ]; then
-    base_model_arg="--base_model_dir ${base_model_eval_results_dir}"
-    echo "Base model 结果目录 (step 0): ${base_model_eval_results_dir}"
-fi
-
 # 使用新的聚合脚本
 python aggregate_eval_results_step.py \
-    --save_path_dir "${eval_saved_path_dir}" \
-    ${base_model_arg}
+    --save_path_dir "${eval_saved_path_dir}"
 
 echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Uploading to TensorBoard..."
 
@@ -901,7 +893,6 @@ python tb_step.py \
     --temperature="${TEMPERATURE}" \
     --save_path_dir="${eval_saved_path_dir}" \
     --tb_path_dir="${tb_path_dir}" \
-    ${base_model_arg} \
     --generate_table
 
 echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] All evaluations completed successfully!"
@@ -910,7 +901,7 @@ echo "=============================================="
 echo "评测完成！"
 echo "  结果目录: ${eval_saved_path_dir}"
 echo "  TensorBoard: ${tb_path_dir}/${EXP_NAME}-temperature_${TEMPERATURE}"
-if [ -n "$base_model_arg" ]; then
+if [ "$SKIP_BASE_MODEL" != "true" ] && [ -d "${base_model_eval_results_dir}" ]; then
     echo "  Base model (step 0): ${base_model_eval_results_dir}"
 fi
 echo "=============================================="
