@@ -30,7 +30,7 @@ data_file=${SE_DATA_DIR}/${data_name}.jsonl
 
 project_name="${SE_PROJECT_NAME:-Skill_Evo}"
 export project_name
-exp_name=data_${data_name}_model_${base_model_name}_v3
+exp_name=data_${data_name}_model_${base_model_name}_v3_no_syn
 export exp_name
 variant="${exp_name}"
 SE_SKILL_SAVED_ROOT="${SE_SKILL_SAVED_ROOT:-/home/ycy/sdi/skill_saved}"
@@ -80,7 +80,7 @@ export SE_N_GPUS SE_GPU_IDS
 #   仍可用旧名 SE_OFFLINE_ROLLOUT_STEPS 作为 BATCH_MULTIPLIER 的缺省来源。
 # =============================================================================
 export SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER="${SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER:-${SE_OFFLINE_ROLLOUT_STEPS:-1}}"
-export SE_OFFLINE_ROLLOUT_BATCH_SIZE="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-128}"
+export SE_OFFLINE_ROLLOUT_BATCH_SIZE="${SE_OFFLINE_ROLLOUT_BATCH_SIZE:-8}"
 # 线下游标仅当 SE_OFFLINE_RESET_STATE=1 时从 0 重置（见 Synthesizer.sh / solver_offline_driver）
 export SE_OFFLINE_RESET_STATE="${SE_OFFLINE_RESET_STATE:-0}"
 export SE_OFFLINE_ROLLOUT_N="${SE_OFFLINE_ROLLOUT_N:-4}"
@@ -93,7 +93,7 @@ export SE_OFFLINE_SKILL_TYPE="${SE_OFFLINE_SKILL_TYPE:-skill_generation_v1}"
 # 实际传给 verl 的 total_training_steps = synthesizer_training_steps = T+2（见下），比「只跑 T 步」多 2 步，总
 #  reward/rollout 时间约 ×(T+2)/T。若与别机「20 分钟跑完」对齐，可改为一律用 T 或统一 base+2。
 # =============================================================================
-SE_SYNTHESIZER_TRAINING_STEPS_BASE="${SE_SYNTHESIZER_TRAINING_STEPS:-20}"
+SE_SYNTHESIZER_TRAINING_STEPS_BASE="${SE_SYNTHESIZER_TRAINING_STEPS:-2}"
 export SE_SYNTHESIZER_TRAINING_STEPS_BASE
 SE_OFFLINE_ROLLOUT_DRIVER_STEPS=$(( SE_SYNTHESIZER_TRAINING_STEPS_BASE * SE_OFFLINE_ROLLOUT_BATCH_MULTIPLIER ))
 export SE_OFFLINE_ROLLOUT_DRIVER_STEPS
@@ -102,7 +102,7 @@ export synthesizer_training_steps
 export SE_SYNTHESIZER_STEPS="${synthesizer_training_steps}"
 export SE_SYNTHESIZER_TRAINING_STEPS="${SE_SYNTHESIZER_TRAINING_STEPS_BASE}"
 
-export SYNTH_BATCH_SIZE="${SYNTH_BATCH_SIZE:-128}"
+export SYNTH_BATCH_SIZE="${SYNTH_BATCH_SIZE:-8}"
 export SYNTH_ROLLOUT_QUERY_NUM="${SYNTH_ROLLOUT_QUERY_NUM:-4}"
 export SYNTH_QUERY_TOP_P="${SYNTH_QUERY_TOP_P:-0.99}"
 export SYNTH_QUERY_TOP_K="${SYNTH_QUERY_TOP_K:--1}"
@@ -121,7 +121,7 @@ export SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE="${SE_OFFLINE_ROLLOUT_HTTP_CHUNK_SIZE:
 # =============================================================================
 # Solver 训练超参数（供 solver.sh 子进程；tensorboard 路径与 exp 名）
 # =============================================================================
-solver_retrain_steps="${SE_SOLVER_RETRAIN_STEPS:-40}"
+solver_retrain_steps="${SE_SOLVER_RETRAIN_STEPS:-2}"
 export solver_retrain_steps
 # solver.sh 内 trainer.total_training_steps = 传参 +5（DAPO/verl 约定）；resume 与 prev ckpt 路径须与此一致
 solver_training_total_steps="$((solver_retrain_steps + 5))"
@@ -129,7 +129,7 @@ export solver_training_total_steps
 prev_synth_ckpt_step="${SE_SYNTHESIZER_PREV_CKPT_STEP:-${SE_SYNTHESIZER_TRAINING_STEPS_BASE}}"
 prev_solver_ckpt_step="${SE_SOLVER_PREV_CKPT_STEP:-${solver_retrain_steps}}"
 export prev_synth_ckpt_step prev_solver_ckpt_step
-solver_batch_size="${SE_SOLVER_BATCH_SIZE:-128}"
+solver_batch_size="${SE_SOLVER_BATCH_SIZE:-8}"
 rollout_n="${SE_SOLVER_ROLLOUT_N:-4}"
 export SE_SOLVER_BATCH_SIZE="${solver_batch_size}"
 export solver_batch_size rollout_n

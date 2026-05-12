@@ -3,31 +3,31 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVOR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$EVOR/../.." && pwd)"
-export PYTHONPATH="${REPO_ROOT}:${EVOR}:${PYTHONPATH:-}"
+source "$SCRIPT_DIR/common_env.sh"
 
 # Do not call external retriever for <search_knowledge> unless explicitly enabled
 export EVOLVER_KNOWLEDGE_SEARCH="${EVOLVER_KNOWLEDGE_SEARCH:-0}"
 # Math outcome reward (Hendrycks-style + <answer>); set EVOLVER_QA_OUTCOME=1 for legacy QA EM
 export EVOLVER_QA_OUTCOME="${EVOLVER_QA_OUTCOME:-0}"
 
-: "${TRAIN_FILE:?set TRAIN_FILE (parquet)}"
-: "${VAL_FILE:?set VAL_FILE (parquet)}"
-: "${MODEL_PATH:?set MODEL_PATH (HF checkpoint)}"
-
 DATA_TRAIN="${TRAIN_FILE}"
 DATA_VAL="${VAL_FILE}"
 GPU_NUM="${NGPUS_PER_NODE:-8}"
-WAND_PROJECT="${WAND_PROJECT:-EvolveR-Math}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-deepmath-evolver-rl}"
-EMBEDDING_API_URL="${EMBEDDING_API_URL:-http://127.0.0.1:8081/v1}"
-RETRIEVE_URL="${RETRIEVE_URL:-http://127.0.0.1:19999/retrieve}"
-EXPERIENCE_EXPORT_DIR="${EXPERIENCE_EXPORT_DIR:-$EVOR/outputs/experience_runs}"
-USE_EXPERIENCE="${USE_EXPERIENCE:-true}"
-# Default 8007 matches evolver/experience/milvusdb/db_server.py
-VDB_SERVER_URL="${VDB_SERVER_URL:-http://127.0.0.1:8007}"
+
+if [ ! -f "$DATA_TRAIN" ]; then
+  echo "TRAIN_FILE not found: $DATA_TRAIN" >&2
+  echo "Run scripts/prepare_math_parquet.sh first or override TRAIN_FILE." >&2
+  exit 1
+fi
+
+if [ ! -f "$DATA_VAL" ]; then
+  echo "VAL_FILE not found: $DATA_VAL" >&2
+  echo "Run scripts/prepare_math_parquet.sh first or override VAL_FILE." >&2
+  exit 1
+fi
 
 mkdir -p "$EXPERIENCE_EXPORT_DIR/$EXPERIMENT_NAME"
+mkdir -p "$CKPTS_DIR"
 
 export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-XFORMERS}"
 export MKL_SERVICE_FORCE_INTEL="${MKL_SERVICE_FORCE_INTEL:-1}"
@@ -89,7 +89,7 @@ python3 run_ppo_math.py \
   trainer.experiment_name="${EXPERIMENT_NAME}" \
   trainer.total_epochs="${TOTAL_EPOCHS:-5}" \
   trainer.total_training_steps="${TOTAL_TRAINING_STEPS:-1000}" \
-  trainer.default_local_dir="${CKPTS_DIR:-$EVOR/outputs/ckpts}/${EXPERIMENT_NAME}" \
+  trainer.default_local_dir="${CKPTS_DIR}/${EXPERIMENT_NAME}" \
   rewards.weights.format="${RW_FORMAT:-0.05}" \
   rewards.weights.outcome=1.0 \
   rewards.weights.info_gain=0 \
