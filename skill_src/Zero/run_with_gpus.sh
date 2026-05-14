@@ -487,7 +487,7 @@ main() {
     echo ""
     
     # 执行 main.sh
-    bash "${SCRIPT_DIR}/main_o.sh"
+    bash "${SCRIPT_DIR}/main_o_no_synth.sh"
     
     local exit_code=$?
     

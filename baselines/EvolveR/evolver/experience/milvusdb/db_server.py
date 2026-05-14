@@ -106,11 +106,12 @@ if __name__ == "__main__":
     logger.info(f"Starting Vector Database Service...")
     logger.info(f"Database directory: {BASE_DIR}")
     logger.info(f"Log file: {LOG_FILE}")
+    port = int(os.environ.get("VDB_PORT", "8007"))
     
     uvicorn.run(
         "db_server:app",
         host="0.0.0.0",
-        port=8007,  # 8080
+        port=port,
         reload=False,
         log_level="info"
     )

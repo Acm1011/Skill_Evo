@@ -28,12 +28,40 @@ def _load_rows(train_file: str) -> list[dict[str, Any]]:
     raise ValueError(f"unsupported train file: {train_file}")
 
 
+def _maybe_json_loads(obj: Any) -> Any:
+    if not isinstance(obj, str):
+        return obj
+    s = obj.strip()
+    if not s:
+        return obj
+    if s[0] not in "[{":
+        return obj
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        return obj
+
+
 def _normalize_messages(prompt_obj: Any) -> list[dict[str, str]]:
+    prompt_obj = _maybe_json_loads(prompt_obj)
+    if isinstance(prompt_obj, np.ndarray):
+        prompt_obj = prompt_obj.tolist()
+    elif isinstance(prompt_obj, tuple):
+        prompt_obj = list(prompt_obj)
     if isinstance(prompt_obj, str):
         return [{"role": "user", "content": prompt_obj}]
     if isinstance(prompt_obj, list):
         return prompt_obj
     raise TypeError(f"prompt must be str or list, got {type(prompt_obj).__name__}")
+
+
+def _normalize_extra_info(extra_info_obj: Any) -> dict[str, Any]:
+    extra_info_obj = _maybe_json_loads(extra_info_obj)
+    if isinstance(extra_info_obj, dict):
+        return extra_info_obj
+    if extra_info_obj is None:
+        return {}
+    raise TypeError(f"extra_info must be dict, got {type(extra_info_obj).__name__}")
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -103,22 +131,26 @@ def run(args: argparse.Namespace) -> int:
             attention_mask = attention_mask.cuda()
 
         with torch.no_grad():
-            out = model.generate(
+            gen_kwargs = dict(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 do_sample=True,
                 temperature=temperature,
                 top_p=top_p,
-                top_k=top_k,
                 max_new_tokens=max_new_tokens,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
+            )
+            if top_k and top_k > 0:
+                gen_kwargs["top_k"] = top_k
+            out = model.generate(
+                **gen_kwargs,
             )
         gen_ids = out[0, input_ids.shape[-1] :]
         skill_str = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
         is_skill_format, skill_or_err = reward_mgr.check_skill_format(skill_str)
 
-        extra_info = row.get("extra_info") or {}
+        extra_info = _normalize_extra_info(row.get("extra_info"))
         raw_q_info = extra_info.get("raw_q_info")
         random_q_info = extra_info.get("random_q_info")
         if not isinstance(raw_q_info, dict) or not isinstance(random_q_info, dict):
@@ -228,4 +260,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

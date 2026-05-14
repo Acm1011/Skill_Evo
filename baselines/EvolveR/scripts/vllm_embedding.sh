@@ -4,7 +4,12 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common_env.sh"
-PORT="${EMBED_PORT:-8081}"
-export CUDA_VISIBLE_DEVICES="${EMBED_CUDA:-0}"
-exec vllm serve "$EMBED_MODEL_PATH" --served-model-name "${SERVED_NAME:-$EMBEDDING_MODEL}" --port "$PORT" \
-  --tensor-parallel-size "$GPU_NUM" --max-model-len 8192 --disable-log-requests
+PORT="${EMBED_PORT}"
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER}"
+export CUDA_VISIBLE_DEVICES="${EMBED_CUDA}"
+exec vllm serve "$EMBED_MODEL_PATH" --served-model-name "${SERVED_NAME}" --port "$PORT" \
+  --task embed \
+  --tensor-parallel-size "$GPU_NUM" \
+  --gpu-memory-utilization "$EMBED_GPU_MEM_UTIL" \
+  --max-model-len "$EMBED_MAX_MODEL_LEN" \
+  --disable-log-requests

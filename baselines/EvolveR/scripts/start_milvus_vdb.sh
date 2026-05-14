@@ -11,8 +11,8 @@ EVOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/common_env.sh"
 MILVUS_DIR="$EVOR/evolver/experience/milvusdb"
 cd "$MILVUS_DIR"
-export EXPERIMENT_NAME="${EXPERIMENT_NAME:-default_exp}"
 # Match upstream naming (hyphens to underscores in env for Milvus)
 export EXPERIMENT_NAME="${EXPERIMENT_NAME//-/_}"
+export EMBEDDING_MODEL_NAME
 mkdir -p "$VDB_BASE_DIR"
 exec python3 db_server.py
