@@ -145,3 +145,4 @@ saved_results/
 /Synthsizer/
 
 embedding_cache/*.zip
+*.zip

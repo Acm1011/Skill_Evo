@@ -5,15 +5,20 @@ shopt -s nullglob
 
 usage() {
     cat <<'EOF'
-批量将给定目录下的 FSDP actor checkpoints 转换为 HuggingFace 权重。
+批量将一个或多个目录中的 FSDP actor checkpoints 转换为 HuggingFace 权重。
 默认只转换，不删除原始 shard；只有显式传 --delete-shards 才会在确认转换成功后清理。
 
 用法:
-  bash skill_src/convert_fsdp_ckpts_to_hf.sh [--delete-shards] <ckpts_root>
+  bash skill_src/convert_fsdp_ckpts_to_hf.sh [--delete-shards] <path> [<path> ...]
 
 示例:
   bash skill_src/convert_fsdp_ckpts_to_hf.sh \
     /home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/skillrl_grpo_qwen3_4b
+  bash skill_src/convert_fsdp_ckpts_to_hf.sh \
+    /home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/verl_grpo_qwen3_4b
+  bash skill_src/convert_fsdp_ckpts_to_hf.sh \
+    /home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b \
+    /home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/verl_gspo_qwen3_4b
 
 目录结构预期:
   <ckpts_root>/global_step_100/actor/
@@ -23,33 +28,41 @@ usage() {
     - huggingface/
 
 脚本行为:
-  1. 遍历所有 global_step_* 目录
-  2. 将 actor 下的 FSDP shard 合并到 actor/huggingface
-  3. 仅当传入 --delete-shards 且发现有效 HF 权重文件时，才删除 actor 下原始 shard ckpt
+  1. 若输入目录本身包含 global_step_*，直接按一个 ckpt root 处理
+  2. 若输入目录不直接包含 global_step_*，自动向下发现真实 ckpt root
+  3. 将每个 global_step_*/actor 下的 FSDP shard 合并到 actor/huggingface
+  4. 仅当传入 --delete-shards 且发现有效 HF 权重文件时，才删除 actor 下原始 shard ckpt
 EOF
 }
 
 DELETE_SHARDS="false"
+INPUT_PATHS=()
 
-if [[ $# -eq 2 && "$1" == "--delete-shards" ]]; then
-    DELETE_SHARDS="true"
-    shift
-fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --delete-shards)
+            DELETE_SHARDS="true"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            INPUT_PATHS+=( "$1" )
+            shift
+            ;;
+    esac
+done
 
-if [[ $# -ne 1 ]]; then
+if [[ ${#INPUT_PATHS[@]} -eq 0 ]]; then
     usage
     exit 1
 fi
 
-CKPTS_ROOT="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-MERGER_SCRIPT="${REPO_ROOT}/SkillRL/scripts/model_merger.py"
-
-if [[ ! -d "${CKPTS_ROOT}" ]]; then
-    echo "Error: checkpoint 根目录不存在: ${CKPTS_ROOT}"
-    exit 1
-fi
+MERGER_SCRIPT="${REPO_ROOT}/skill_src/model_merger.py"
 
 if [[ ! -f "${MERGER_SCRIPT}" ]]; then
     echo "Error: merger 脚本不存在: ${MERGER_SCRIPT}"
@@ -99,86 +112,146 @@ delete_fsdp_shards() {
     echo "    已删除 ${#shard_files[@]} 个原始 shard 文件"
 }
 
+is_ckpts_root() {
+    local ckpts_root="$1"
+    local step_dirs=( "${ckpts_root}"/global_step_* )
+    [[ ${#step_dirs[@]} -gt 0 ]]
+}
+
+discover_ckpts_roots() {
+    local input_path="$1"
+
+    if [[ ! -d "${input_path}" ]]; then
+        echo "Error: 输入目录不存在: ${input_path}" >&2
+        return 1
+    fi
+
+    if is_ckpts_root "${input_path}"; then
+        printf '%s\n' "${input_path}"
+        return 0
+    fi
+
+    find "${input_path}" -mindepth 1 -maxdepth 4 -type d | while read -r candidate; do
+        if is_ckpts_root "${candidate}"; then
+            printf '%s\n' "${candidate}"
+        fi
+    done
+}
+
+declare -A CKPTS_ROOT_MAP=()
+for input_path in "${INPUT_PATHS[@]}"; do
+    while IFS= read -r discovered_root; do
+        [[ -n "${discovered_root}" ]] || continue
+        CKPTS_ROOT_MAP["${discovered_root}"]=1
+    done < <(discover_ckpts_roots "${input_path}")
+done
+
+CKPTS_ROOTS=( "${!CKPTS_ROOT_MAP[@]}" )
+IFS=$'\n' CKPTS_ROOTS=( $(printf '%s\n' "${CKPTS_ROOTS[@]}" | sort) )
+unset IFS
+
+if [[ ${#CKPTS_ROOTS[@]} -eq 0 ]]; then
+    echo "Error: 未发现任何包含 global_step_* 的 checkpoint 根目录"
+    exit 1
+fi
+
 echo "=============================================="
 echo "Batch FSDP -> HuggingFace conversion"
-echo "  ckpts_root: ${CKPTS_ROOT}"
+echo "  input_paths: ${#INPUT_PATHS[@]}"
+for input_path in "${INPUT_PATHS[@]}"; do
+    echo "    - ${input_path}"
+done
+echo "  ckpts_roots: ${#CKPTS_ROOTS[@]}"
+for ckpts_root in "${CKPTS_ROOTS[@]}"; do
+    echo "    - ${ckpts_root}"
+done
 echo "  repo_root:  ${REPO_ROOT}"
 echo "  delete:     ${DELETE_SHARDS}"
 echo "=============================================="
-
-step_dirs=( "${CKPTS_ROOT}"/global_step_* )
-if [[ ${#step_dirs[@]} -eq 0 ]]; then
-    echo "Error: 未找到任何 global_step_* 目录: ${CKPTS_ROOT}"
-    exit 1
-fi
 
 converted_count=0
 skipped_count=0
 failed_count=0
 deleted_count=0
 
-for step_dir in "${step_dirs[@]}"; do
-    step_name="$(basename "${step_dir}")"
-    actor_dir="${step_dir}/actor"
-    hf_dir="${actor_dir}/huggingface"
-
-    echo
-    echo "==> 处理 ${step_name}"
-
-    if [[ ! -d "${actor_dir}" ]]; then
-        echo "    跳过: actor 目录不存在: ${actor_dir}"
+for ckpts_root in "${CKPTS_ROOTS[@]}"; do
+    step_dirs=( "${ckpts_root}"/global_step_* )
+    if [[ ${#step_dirs[@]} -eq 0 ]]; then
+        echo
+        echo "==> 跳过 ckpt root: ${ckpts_root}"
+        echo "    原因: 未找到任何 global_step_* 目录"
         skipped_count=$((skipped_count + 1))
         continue
     fi
 
-    mkdir -p "${hf_dir}"
+    echo
+    echo "=============================================="
+    echo "处理 ckpt root: ${ckpts_root}"
+    echo "=============================================="
 
-    if ! has_fsdp_shards "${actor_dir}"; then
-        if is_hf_export_complete "${hf_dir}"; then
-            echo "    跳过: 已存在有效 HF 权重，且 shard 已清理"
+    for step_dir in "${step_dirs[@]}"; do
+        step_name="$(basename "${step_dir}")"
+        actor_dir="${step_dir}/actor"
+        hf_dir="${actor_dir}/huggingface"
+
+        echo
+        echo "==> 处理 ${step_name}"
+
+        if [[ ! -d "${actor_dir}" ]]; then
+            echo "    跳过: actor 目录不存在: ${actor_dir}"
             skipped_count=$((skipped_count + 1))
             continue
         fi
 
-        echo "    跳过: 未发现 FSDP shard 文件"
-        skipped_count=$((skipped_count + 1))
-        continue
-    fi
+        mkdir -p "${hf_dir}"
 
-    if is_hf_export_complete "${hf_dir}"; then
-        if [[ "${DELETE_SHARDS}" == "true" ]]; then
-            echo "    已存在有效 HF 权重，开始删除原始 shard"
-            delete_fsdp_shards "${actor_dir}"
-            deleted_count=$((deleted_count + 1))
-        else
-            echo "    已存在有效 HF 权重，保留原始 shard"
+        if ! has_fsdp_shards "${actor_dir}"; then
+            if is_hf_export_complete "${hf_dir}"; then
+                echo "    跳过: 已存在有效 HF 权重，且 shard 已清理"
+                skipped_count=$((skipped_count + 1))
+                continue
+            fi
+
+            echo "    跳过: 未发现 FSDP shard 文件"
+            skipped_count=$((skipped_count + 1))
+            continue
         fi
-        skipped_count=$((skipped_count + 1))
-        continue
-    fi
 
-    echo "    开始合并到 ${hf_dir}"
-    if python "${MERGER_SCRIPT}" merge \
-        --backend fsdp \
-        --local_dir "${actor_dir}" \
-        --target_dir "${hf_dir}"; then
         if is_hf_export_complete "${hf_dir}"; then
-            converted_count=$((converted_count + 1))
             if [[ "${DELETE_SHARDS}" == "true" ]]; then
-                echo "    合并成功，开始删除原始 shard"
+                echo "    已存在有效 HF 权重，开始删除原始 shard"
                 delete_fsdp_shards "${actor_dir}"
                 deleted_count=$((deleted_count + 1))
             else
-                echo "    合并成功，保留原始 shard"
+                echo "    已存在有效 HF 权重，保留原始 shard"
+            fi
+            skipped_count=$((skipped_count + 1))
+            continue
+        fi
+
+        echo "    开始合并到 ${hf_dir}"
+        if python "${MERGER_SCRIPT}" merge \
+            --backend fsdp \
+            --local_dir "${actor_dir}" \
+            --target_dir "${hf_dir}"; then
+            if is_hf_export_complete "${hf_dir}"; then
+                converted_count=$((converted_count + 1))
+                if [[ "${DELETE_SHARDS}" == "true" ]]; then
+                    echo "    合并成功，开始删除原始 shard"
+                    delete_fsdp_shards "${actor_dir}"
+                    deleted_count=$((deleted_count + 1))
+                else
+                    echo "    合并成功，保留原始 shard"
+                fi
+            else
+                echo "    失败: merger 返回成功，但未检测到有效 HF 权重"
+                failed_count=$((failed_count + 1))
             fi
         else
-            echo "    失败: merger 返回成功，但未检测到有效 HF 权重"
+            echo "    失败: 合并命令执行出错"
             failed_count=$((failed_count + 1))
         fi
-    else
-        echo "    失败: 合并命令执行出错"
-        failed_count=$((failed_count + 1))
-    fi
+    done
 done
 
 echo
