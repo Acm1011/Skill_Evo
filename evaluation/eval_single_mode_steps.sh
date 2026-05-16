@@ -181,8 +181,44 @@ eval_saved_path_dir=${save_path_dir}/${EXP_NAME}_temperature${TEMPERATURE}
 
 mkdir -p "${eval_saved_path_dir}" "${tb_path_dir}" "${WORKING_DIR}/eval_logs"
 mkdir -p "${CUSTOM_EVAL_DATA_DIR}"
-ln -sfn "${TEMP_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/temp_data.parquet"
-ln -sfn "${GREEDY_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/greedy_data.parquet"
+
+normalize_eval_parquet() {
+    local src_file="$1"
+    local dst_file="$2"
+
+    python - "$src_file" "$dst_file" <<'PY'
+import json
+import os
+import sys
+import pandas as pd
+
+src_file, dst_file = sys.argv[1], sys.argv[2]
+
+df = pd.read_parquet(src_file)
+
+def maybe_parse_json(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+for column in ("extra_info", "reward_model"):
+    if column in df.columns:
+        df[column] = df[column].map(maybe_parse_json)
+
+tmp_file = f"{dst_file}.tmp"
+df.to_parquet(tmp_file)
+os.replace(tmp_file, dst_file)
+print(f"规范化评测数据: {src_file} -> {dst_file}")
+PY
+}
+
+normalize_eval_parquet "${TEMP_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/temp_data.parquet"
+normalize_eval_parquet "${GREEDY_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/greedy_data.parquet"
 
 cd "${eval_path}"
 
