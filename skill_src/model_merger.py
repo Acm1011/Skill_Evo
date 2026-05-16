@@ -104,15 +104,37 @@ class BaseModelMerger(ABC):
 
         self.model_config = AutoConfig.from_pretrained(self.hf_model_config_path)
 
+    def _resolve_architecture_name(self) -> str:
+        architectures = getattr(self.model_config, "architectures", None)
+        if architectures:
+            return architectures[0]
+
+        model_type = getattr(self.model_config, "model_type", None)
+        if model_type:
+            # Most RL checkpoints here are decoder-only LMs. When `architectures`
+            # is missing in config.json, fall back to the standard CausalLM path.
+            print(
+                f"Warning: `architectures` missing in config at {self.hf_model_config_path}; "
+                f"falling back to AutoModelForCausalLM for model_type={model_type}."
+            )
+            return "AutoModelForCausalLM"
+
+        raise ValueError(
+            f"Could not determine architecture from config at {self.hf_model_config_path}: "
+            f"`architectures` and `model_type` are both missing."
+        )
+
     def get_transformers_auto_model_class(self):
-        if "ForTokenClassification" in self.model_config.architectures[0]:
+        architecture_name = self._resolve_architecture_name()
+
+        if "ForTokenClassification" in architecture_name:
             return AutoModelForTokenClassification
-        elif "ForCausalLM" in self.model_config.architectures[0]:
+        elif "ForCausalLM" in architecture_name:
             return AutoModelForCausalLM
-        elif "ForConditionalGeneration" in self.model_config.architectures[0]:
+        elif "ForConditionalGeneration" in architecture_name:
             return AutoModelForVision2Seq
 
-        raise NotImplementedError(f"Unknown architecture {self.model_config.architectures}")
+        raise NotImplementedError(f"Unknown architecture {architecture_name}")
 
     def patch_model_generation_config(self, model):
         """
@@ -171,7 +193,11 @@ class FSDPModelMerger(BaseModelMerger):
         raise FileNotFoundError(f"Could not determine world size. No file matching 'model_world_size_(\d+)_rank_0.pt' found in {self.config.local_dir}")
 
     def _load_rank_zero_state_dict(self, world_size: int) -> dict:
-        return torch.load(Path(self.config.local_dir) / f"model_world_size_{world_size}_rank_0.pt", map_location="cpu", weights_only=False)
+        model_path = Path(self.config.local_dir) / f"model_world_size_{world_size}_rank_0.pt"
+        try:
+            return torch.load(model_path, map_location="cpu", weights_only=False)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load rank-0 shard: {model_path}") from exc
 
     def _extract_device_mesh_info(self, state_dict: dict, world_size: int) -> tuple[np.ndarray, tuple[str, ...]]:
         """
