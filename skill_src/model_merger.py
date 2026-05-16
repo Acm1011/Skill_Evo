@@ -39,6 +39,7 @@ https://verl.readthedocs.io/en/latest/advance/checkpoint.html#convert-fsdp-and-m
 import argparse
 import os
 import re
+import shutil
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -163,13 +164,54 @@ class BaseModelMerger(ABC):
         del model
 
         processor = hf_processor(self.hf_model_config_path)
-        tokenizer = hf_tokenizer(self.hf_model_config_path)
         if processor is not None:
             print(f"Saving processor to {self.config.target_dir}")
             processor.save_pretrained(self.config.target_dir)
+        self.save_tokenizer_assets()
+
+    def save_tokenizer_assets(self):
+        try:
+            tokenizer = hf_tokenizer(self.hf_model_config_path)
+        except Exception as exc:
+            print(
+                f"Warning: failed to load tokenizer from {self.hf_model_config_path}: {exc}. "
+                "Falling back to copying tokenizer assets directly."
+            )
+            self.copy_tokenizer_assets()
+            return
+
         if tokenizer is not None:
             print(f"Saving tokenizer to {self.config.target_dir}")
             tokenizer.save_pretrained(self.config.target_dir)
+
+    def copy_tokenizer_assets(self):
+        source_dir = Path(self.hf_model_config_path)
+        if not source_dir.is_dir():
+            raise FileNotFoundError(f"Tokenizer source directory does not exist: {source_dir}")
+
+        copied = 0
+        tokenizer_asset_names = (
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "added_tokens.json",
+            "vocab.json",
+            "merges.txt",
+            "sentencepiece.bpe.model",
+            "spiece.model",
+            "chat_template.jinja",
+        )
+
+        for asset_name in tokenizer_asset_names:
+            source_path = source_dir / asset_name
+            if source_path.exists():
+                shutil.copy2(source_path, Path(self.config.target_dir) / asset_name)
+                copied += 1
+
+        if copied == 0:
+            raise FileNotFoundError(f"No tokenizer assets found under {source_dir}")
+
+        print(f"Copied {copied} tokenizer asset files to {self.config.target_dir}")
 
     def upload_to_huggingface(self):
         from huggingface_hub import HfApi
