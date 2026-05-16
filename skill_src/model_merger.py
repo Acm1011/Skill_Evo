@@ -226,6 +226,55 @@ class BaseModelMerger(ABC):
 
 
 class FSDPModelMerger(BaseModelMerger):
+    def __init__(self, config: ModelMergerConfig):
+        config.hf_model_config_path = self._resolve_hf_asset_dir(config)
+        super().__init__(config)
+
+    @staticmethod
+    def _looks_like_hf_asset_dir(path: Path) -> bool:
+        required_markers = (
+            "config.json",
+            "tokenizer_config.json",
+            "tokenizer.json",
+            "vocab.json",
+            "merges.txt",
+        )
+        return any((path / marker).exists() for marker in required_markers)
+
+    @classmethod
+    def _resolve_hf_asset_dir(cls, config: ModelMergerConfig) -> str:
+        if config.hf_model_path:
+            return config.hf_model_path
+
+        local_dir = Path(config.local_dir)
+        candidates = []
+
+        current_hf_dir = local_dir / "huggingface"
+        candidates.append(current_hf_dir)
+        candidates.append(local_dir)
+
+        step_dir = local_dir.parent
+        ckpt_root = step_dir.parent if step_dir.name.startswith("global_step_") else None
+        if ckpt_root is not None and ckpt_root.is_dir():
+            for sibling_step_dir in sorted(ckpt_root.glob("global_step_*")):
+                sibling_hf_dir = sibling_step_dir / "actor" / "huggingface"
+                candidates.append(sibling_hf_dir)
+
+        seen = set()
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.is_dir() and cls._looks_like_hf_asset_dir(candidate):
+                print(f"Using HF assets from {candidate}")
+                return str(candidate)
+
+        raise FileNotFoundError(
+            f"Could not find HuggingFace config/tokenizer assets for local_dir={config.local_dir}. "
+            f"Tried current actor/huggingface and sibling global_step_*/actor/huggingface directories."
+        )
+
     def _get_world_size(self) -> int:
         """Extracts the FSDP world_size from checkpoint filenames (e.g., 'model_world_size_8_rank_0.pt')."""
         for filename in os.listdir(self.config.local_dir):
