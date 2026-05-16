@@ -73,6 +73,14 @@ is_hf_export_complete() {
     local hf_dir="$1"
     [[ -d "${hf_dir}" ]] || return 1
     [[ -f "${hf_dir}/config.json" ]] || return 1
+    has_hf_weight_files "${hf_dir}" || return 1
+    has_hf_tokenizer_assets "${hf_dir}" || return 1
+    return 0
+}
+
+has_hf_weight_files() {
+    local hf_dir="$1"
+    [[ -d "${hf_dir}" ]] || return 1
     [[ -f "${hf_dir}/model.safetensors" ]] && return 0
     [[ -f "${hf_dir}/pytorch_model.bin" ]] && return 0
 
@@ -83,6 +91,57 @@ is_hf_export_complete() {
     [[ ${#bin_shards[@]} -gt 0 ]] && [[ -f "${hf_dir}/pytorch_model.bin.index.json" ]] && return 0
 
     return 1
+}
+
+has_hf_tokenizer_assets() {
+    local hf_dir="$1"
+    [[ -d "${hf_dir}" ]] || return 1
+
+    local tokenizer_files=(
+        "${hf_dir}/tokenizer.json"
+        "${hf_dir}/tokenizer_config.json"
+        "${hf_dir}/vocab.json"
+        "${hf_dir}/merges.txt"
+        "${hf_dir}/spiece.model"
+        "${hf_dir}/sentencepiece.bpe.model"
+    )
+
+    local asset
+    for asset in "${tokenizer_files[@]}"; do
+        [[ -f "${asset}" ]] && return 0
+    done
+
+    return 1
+}
+
+describe_hf_export_state() {
+    local hf_dir="$1"
+    local parts=()
+
+    if [[ ! -d "${hf_dir}" ]]; then
+        echo "目录不存在"
+        return 0
+    fi
+
+    if [[ -f "${hf_dir}/config.json" ]]; then
+        parts+=( "config=ok" )
+    else
+        parts+=( "config=missing" )
+    fi
+
+    if has_hf_weight_files "${hf_dir}"; then
+        parts+=( "weights=ok" )
+    else
+        parts+=( "weights=missing" )
+    fi
+
+    if has_hf_tokenizer_assets "${hf_dir}"; then
+        parts+=( "tokenizer=ok" )
+    else
+        parts+=( "tokenizer=missing" )
+    fi
+
+    printf '%s' "${parts[*]}"
 }
 
 has_fsdp_shards() {
@@ -212,6 +271,13 @@ for ckpts_root in "${CKPTS_ROOTS[@]}"; do
                 continue
             fi
 
+            if has_hf_weight_files "${hf_dir}" || [[ -f "${hf_dir}/config.json" ]]; then
+                echo "    失败: 发现半成品 HF 导出，但 shard 已不存在，无法自动修复"
+                echo "    当前状态: $(describe_hf_export_state "${hf_dir}")"
+                failed_count=$((failed_count + 1))
+                continue
+            fi
+
             echo "    跳过: 未发现 FSDP shard 文件"
             skipped_count=$((skipped_count + 1))
             continue
@@ -227,6 +293,11 @@ for ckpts_root in "${CKPTS_ROOTS[@]}"; do
             fi
             skipped_count=$((skipped_count + 1))
             continue
+        fi
+
+        if has_hf_weight_files "${hf_dir}" || [[ -f "${hf_dir}/config.json" ]] || has_hf_tokenizer_assets "${hf_dir}"; then
+            echo "    检测到半成品 HF 导出，重新执行 merge 修复"
+            echo "    当前状态: $(describe_hf_export_state "${hf_dir}")"
         fi
 
         echo "    开始合并到 ${hf_dir}"
