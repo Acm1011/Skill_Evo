@@ -519,7 +519,14 @@ prepare_test_data_after_training() {
         return 1
     }
 
+    local temp_output_jsonl="${out_dir}/temp_data_skill.jsonl"
+    local temp_output_parquet="${out_dir}/temp_data_skill.parquet"
+    local greedy_output_jsonl="${out_dir}/greedy_data_skill.jsonl"
+    local greedy_output_parquet="${out_dir}/greedy_data_skill.parquet"
+
     echo "训练后准备测试数据：memory=${latest_mem}, output_dir=${out_dir} (default=${default_prepare_out_dir})"
+    echo "  ${test_input_1} -> ${temp_output_jsonl}, ${temp_output_parquet}"
+    echo "  ${test_input_2} -> ${greedy_output_jsonl}, ${greedy_output_parquet}"
     echo "retriever 启动前：清理残留 python 进程..."
     pkill python 2> /dev/null || true
     sleep 4
@@ -545,12 +552,24 @@ prepare_test_data_after_training() {
 
     python3 "${script}" \
         --memory-jsonl "${latest_mem}" \
-        --inputs "${test_input_1}" "${test_input_2}" \
+        --inputs "${test_input_1}" \
         --output-dir "${out_dir}" \
         --top-k "${prepare_top_k}" \
         --write-jsonl \
         --write-parquet || {
-        echo "Error: prepare_test_data.py 执行失败" >&2
+        echo "Error: prepare_test_data.py 执行失败: ${test_input_1}" >&2
+        pkill python 2> /dev/null || true
+        return 1
+    }
+
+    python3 "${script}" \
+        --memory-jsonl "${latest_mem}" \
+        --inputs "${test_input_2}" \
+        --output-dir "${out_dir}" \
+        --top-k "${prepare_top_k}" \
+        --write-jsonl \
+        --write-parquet || {
+        echo "Error: prepare_test_data.py 执行失败: ${test_input_2}" >&2
         pkill python 2> /dev/null || true
         return 1
     }
