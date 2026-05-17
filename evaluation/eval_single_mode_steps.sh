@@ -206,7 +206,7 @@ def maybe_parse_json(value):
                 return value
     return value
 
-for column in ("extra_info", "reward_model"):
+for column in ("prompt", "extra_info", "reward_model"):
     if column in df.columns:
         df[column] = df[column].map(maybe_parse_json)
 

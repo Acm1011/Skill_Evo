@@ -13,6 +13,17 @@ import random
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
+def maybe_parse_json(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+
 def get_max_position_embeddings(model_path):
     """从模型配置中获取 max_position_embeddings"""
     try:
@@ -121,6 +132,8 @@ def main(args):
         raise ValueError(f"dataset:{args.dataset} not found at {dataset_path}")
     
     dataset = pd.read_parquet(dataset_path)
+    if "prompt" in dataset.columns:
+        dataset["prompt"] = dataset["prompt"].map(maybe_parse_json)
     print(f'加载 {len(dataset)} 条数据从 {dataset_path}')
     
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
