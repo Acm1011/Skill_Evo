@@ -24,6 +24,40 @@ python -m baselines.ReasoningBankMath evolve-memory \
   --teacher-base-url http://127.0.0.1:8000/v1 --teacher-model your-model
 ```
 
+## 什么时候需要启动 server
+
+- `gen-traj`：需要 rollout server，因为它会调用学生模型生成轨迹。
+- `build-memory` / `evolve-memory`：
+  - 用 `--teacher-backend chat` 时，不需要 rollout server，但需要一个 OpenAI-compatible `/chat/completions` 服务。
+  - 用 `--teacher-backend rollout` 时，需要 rollout server。
+- `build-embeddings`：
+  - 用 `--backend hash` 时，不需要任何服务。
+  - 用 `--backend openai` 时，需要一个 OpenAI-compatible `/embeddings` 服务。
+- `retrieve`：只依赖已经生成好的 embedding 文件；若现查现嵌入且 `--backend openai`，则需要 embedding 服务。
+
+## 直接可执行脚本
+
+脚本目录：[scripts/](scripts)
+
+- `run_gen_traj.sh`：自动启动 `skill_src/Zero/start_rollout_servers.sh`，然后生成轨迹。
+- `run_build_memory_with_rollout.sh`：自动启动 rollout server，然后用 rollout backend 建 memory 库。
+- `run_build_memory_pipeline.sh`：自动启动 rollout server，然后从 `trajectories jsonl` 一次性生成 `memory_bank + memory_embeddings`。
+- `run_evolve_memory_with_rollout.sh`：自动启动 rollout server，然后增量进化 memory 库。
+- `build_embeddings.sh`：直接包装 `python -m baselines.ReasoningBankMath build-embeddings`
+- `retrieve.sh`：直接包装 `python -m baselines.ReasoningBankMath retrieve`
+
+示例：
+
+```bash
+bash baselines/ReasoningBankMath/scripts/run_build_memory_with_rollout.sh \
+  --trajectories baselines/SkillRL/outputs/trajectories_from_merged_v1_v2.jsonl \
+  --model ../models/Qwen3-4B-Instruct-2507 \
+  --output baselines/ReasoningBankMath/outputs/memory_bank_v1_v2.jsonl
+
+bash baselines/ReasoningBankMath/scripts/run_build_memory_pipeline.sh \
+  --model ../models/Qwen3-4B-Instruct-2507
+```
+
 ## Data Contract
 
 - 输入轨迹兼容 `SkillRL`：`problem`、`topic`、`topic_key`、`difficulty`、`student_response`、`is_correct`、`ground_truth`
