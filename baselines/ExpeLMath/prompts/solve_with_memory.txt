@@ -1,0 +1,9 @@
+Please solve the following math problem. Reason step by step, and put your final answer within \boxed{{}}.
+
+Use the retrieved experience-driven insights if they are helpful. If a retrieved item is irrelevant, ignore it.
+
+{retrieved_context}
+
+Question:
+{question}
+

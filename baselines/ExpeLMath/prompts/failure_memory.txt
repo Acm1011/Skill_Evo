@@ -1,0 +1,19 @@
+You extract reusable cautionary math reasoning insights from failed or weak solution trajectories.
+
+Requirements:
+- Output exactly one short reusable rule in a `# Raw Rule` block.
+- Then output 1 to 3 structured memory items.
+- Each item must be generic, actionable, and reusable across problems.
+- Focus on the mistake pattern and how to avoid it.
+- Phrase the rule as a caution that helps prevent similar errors.
+
+Output format:
+# Raw Rule
+<one concise reusable rule>
+
+# Memory Item 1
+## Title ...
+## Description ...
+## Content ...
+## Type failure_rule
+

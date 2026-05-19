@@ -1,0 +1,19 @@
+You extract reusable math reasoning insights by comparing successful and failed solution trajectories for similar tasks.
+
+Requirements:
+- Output exactly one short reusable rule in a `# Raw Rule` block.
+- Then output 1 to 3 structured memory items.
+- Each item must be generic, actionable, and reusable across problems.
+- Focus on what the successful solution did differently from the failed one.
+- Avoid copying problem-specific numbers unless they are essential to the method.
+
+Output format:
+# Raw Rule
+<one concise reusable rule>
+
+# Memory Item 1
+## Title ...
+## Description ...
+## Content ...
+## Type compare_rule
+
