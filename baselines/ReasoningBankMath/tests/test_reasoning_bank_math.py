@@ -9,6 +9,7 @@ from unittest import mock
 
 from baselines.ReasoningBankMath.build_embeddings import run_build_embeddings
 from baselines.ReasoningBankMath.build_memory import run_build_memory
+from baselines.ReasoningBankMath.compact_memory import run_compact_memory
 from baselines.ReasoningBankMath.evolve_memory import run_evolve_memory
 from baselines.ReasoningBankMath.io_utils import read_jsonl
 from baselines.ReasoningBankMath.memory_bank import dedupe_records, load_trajectories
@@ -95,6 +96,69 @@ class ReasoningBankMathTests(unittest.TestCase):
         self.assertEqual(dup_map["mem_new"], "mem_old")
         self.assertEqual(merged[0]["duplicate_count"], 1)
         self.assertEqual(len(merged[0]["provenance"]), 2)
+
+    def test_compact_memory_dedupes_existing_bank(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            memory_bank = tmp / "memory_bank.jsonl"
+            compact_bank = tmp / "memory_bank_compact.jsonl"
+            compact_emb = tmp / "memory_embeddings_compact.jsonl"
+            rows = [
+                {
+                    "memory_id": "mem_a",
+                    "query": "Solve x+2=5",
+                    "topic": "Math->Algebra",
+                    "topic_key": "Math_Algebra",
+                    "status": "success",
+                    "memory_items": [
+                        {
+                            "title": "Isolate the variable",
+                            "description": "Reverse operations carefully.",
+                            "content": "Undo additions step by step and verify in the original equation.",
+                        }
+                    ],
+                    "provenance": [{"source_idx": 1}],
+                },
+                {
+                    "memory_id": "mem_b",
+                    "query": "Solve x+7=10",
+                    "topic": "Math->Algebra",
+                    "topic_key": "Math_Algebra",
+                    "status": "success",
+                    "memory_items": [
+                        {
+                            "title": "Isolate the variable",
+                            "description": "Reverse operations carefully.",
+                            "content": "Undo additions step by step and verify in the original equation.",
+                        }
+                    ],
+                    "provenance": [{"source_idx": 2}],
+                },
+            ]
+            memory_bank.write_text(
+                "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                memory_bank=str(memory_bank),
+                output_memory_bank=str(compact_bank),
+                existing_embeddings="",
+                output_embeddings=str(compact_emb),
+                embed_backend="hash",
+                embed_base_url="",
+                embed_api_key="",
+                embed_model="",
+                timeout=60.0,
+                hash_dim=128,
+                similarity_threshold=0.98,
+            )
+            rc = run_compact_memory(args)
+            self.assertEqual(rc, 0)
+            merged = read_jsonl(compact_bank)
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["duplicate_count"], 1)
+            self.assertEqual(len(merged[0]["provenance"]), 2)
+            self.assertTrue(compact_emb.is_file())
 
     def test_end_to_end_build_retrieve_evolve(self) -> None:
         with tempfile.TemporaryDirectory() as td:

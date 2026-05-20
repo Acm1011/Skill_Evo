@@ -7,6 +7,7 @@ from baselines.SkillRL.student_rollout import build_gen_traj_parser
 
 from .build_embeddings import build_build_embeddings_parser
 from .build_memory import build_build_memory_parser
+from .compact_memory import build_compact_memory_parser
 from .evolve_memory import build_evolve_memory_parser
 from .retrieve_memory import build_retrieve_parser
 
@@ -21,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     build_build_embeddings_parser(sub)
     build_retrieve_parser(sub)
     build_evolve_memory_parser(sub)
+    build_compact_memory_parser(sub)
     args = parser.parse_args(argv)
     fn = getattr(args, "_run", None)
     if fn is None:
@@ -31,4 +33,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -43,6 +43,7 @@ python -m baselines.ReasoningBankMath evolve-memory \
 - `run_build_memory_with_rollout.sh`：自动启动 rollout server，然后用 rollout backend 建 memory 库。
 - `run_build_memory_pipeline.sh`：自动启动 rollout server，然后从 `trajectories jsonl` 一次性生成 `memory_bank + memory_embeddings`。
 - `run_evolve_memory_with_rollout.sh`：自动启动 rollout server，然后增量进化 memory 库。
+- `run_compact_memory.sh`：不依赖新轨迹，直接对已有 `memory_bank` 做去重合并，并可同步刷新 embeddings。
 - `build_embeddings.sh`：直接包装 `python -m baselines.ReasoningBankMath build-embeddings`
 - `retrieve.sh`：直接包装 `python -m baselines.ReasoningBankMath retrieve`
 
@@ -56,6 +57,12 @@ bash baselines/ReasoningBankMath/scripts/run_build_memory_with_rollout.sh \
 
 bash baselines/ReasoningBankMath/scripts/run_build_memory_pipeline.sh \
   --model ../models/Qwen3-4B-Instruct-2507
+
+bash baselines/ReasoningBankMath/scripts/run_compact_memory.sh \
+  --memory-bank baselines/ReasoningBankMath/outputs/memory_bank_v1_v2.jsonl \
+  --output-memory-bank baselines/ReasoningBankMath/outputs/memory_bank_v1_v2_compact.jsonl \
+  --existing-embeddings baselines/ReasoningBankMath/outputs/memory_embeddings_v1_v2.jsonl \
+  --output-embeddings baselines/ReasoningBankMath/outputs/memory_embeddings_v1_v2_compact.jsonl
 ```
 
 ## Data Contract
