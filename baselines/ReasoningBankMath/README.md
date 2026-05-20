@@ -44,6 +44,7 @@ python -m baselines.ReasoningBankMath evolve-memory \
 - `run_build_memory_pipeline.sh`：自动启动 rollout server，然后从 `trajectories jsonl` 一次性生成 `memory_bank + memory_embeddings`。
 - `run_evolve_memory_with_rollout.sh`：自动启动 rollout server，然后增量进化 memory 库。
 - `run_compact_memory.sh`：不依赖新轨迹，直接对已有 `memory_bank` 做去重合并，并可同步刷新 embeddings。
+- `run_refine_memory_with_rollout.sh`：先聚类相近 memory，再调用 LLM 对每个 cluster 重写成更干净的 evolved memory。
 - `build_embeddings.sh`：直接包装 `python -m baselines.ReasoningBankMath build-embeddings`
 - `retrieve.sh`：直接包装 `python -m baselines.ReasoningBankMath retrieve`
 
@@ -63,6 +64,13 @@ bash baselines/ReasoningBankMath/scripts/run_compact_memory.sh \
   --output-memory-bank baselines/ReasoningBankMath/outputs/memory_bank_v1_v2_compact.jsonl \
   --existing-embeddings baselines/ReasoningBankMath/outputs/memory_embeddings_v1_v2.jsonl \
   --output-embeddings baselines/ReasoningBankMath/outputs/memory_embeddings_v1_v2_compact.jsonl
+
+bash baselines/ReasoningBankMath/scripts/run_refine_memory_with_rollout.sh \
+  --memory-bank baselines/ReasoningBankMath/outputs/memory_bank_v1_v2.jsonl \
+  --model ../models/Qwen3-4B-Instruct-2507 \
+  --existing-embeddings baselines/ReasoningBankMath/outputs/memory_embeddings_v1_v2.jsonl \
+  --output-memory-bank baselines/ReasoningBankMath/outputs/memory_bank_v1_v2_refined.jsonl \
+  --output-embeddings baselines/ReasoningBankMath/outputs/memory_embeddings_v1_v2_refined.jsonl
 ```
 
 ## Data Contract

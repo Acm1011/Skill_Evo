@@ -11,6 +11,7 @@ from baselines.ReasoningBankMath.build_embeddings import run_build_embeddings
 from baselines.ReasoningBankMath.build_memory import run_build_memory
 from baselines.ReasoningBankMath.compact_memory import run_compact_memory
 from baselines.ReasoningBankMath.evolve_memory import run_evolve_memory
+from baselines.ReasoningBankMath.refine_memory import run_refine_memory
 from baselines.ReasoningBankMath.io_utils import read_jsonl
 from baselines.ReasoningBankMath.memory_bank import dedupe_records, load_trajectories
 from baselines.ReasoningBankMath.memory_parser import parse_memory_items
@@ -159,6 +160,94 @@ class ReasoningBankMathTests(unittest.TestCase):
             self.assertEqual(merged[0]["duplicate_count"], 1)
             self.assertEqual(len(merged[0]["provenance"]), 2)
             self.assertTrue(compact_emb.is_file())
+
+    def test_refine_memory_rewrites_cluster_with_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            memory_bank = tmp / "memory_bank.jsonl"
+            refined_bank = tmp / "memory_bank_refined.jsonl"
+            refined_emb = tmp / "memory_embeddings_refined.jsonl"
+            rows = [
+                {
+                    "memory_id": "mem_a",
+                    "query": "Solve x+2=5",
+                    "topic": "Math->Algebra",
+                    "topic_key": "Math_Algebra",
+                    "status": "success",
+                    "embedding_text": "Question: Solve x+2=5\nIsolate the variable",
+                    "memory_items": [
+                        {
+                            "title": "Isolate the variable",
+                            "description": "Reverse operations carefully.",
+                            "content": "Undo additions step by step and verify in the original equation.",
+                        }
+                    ],
+                    "provenance": [{"source_idx": 1}],
+                },
+                {
+                    "memory_id": "mem_b",
+                    "query": "Solve x+7=10",
+                    "topic": "Math->Algebra",
+                    "topic_key": "Math_Algebra",
+                    "status": "success",
+                    "embedding_text": "Question: Solve x+7=10\nIsolate the variable",
+                    "memory_items": [
+                        {
+                            "title": "Undo inverse operations",
+                            "description": "Peel operations off carefully.",
+                            "content": "Reverse the outer operation, then verify the candidate by substitution.",
+                        }
+                    ],
+                    "provenance": [{"source_idx": 2}],
+                },
+            ]
+            memory_bank.write_text(
+                "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                memory_bank=str(memory_bank),
+                output_memory_bank=str(refined_bank),
+                existing_embeddings="",
+                output_embeddings=str(refined_emb),
+                teacher_base_url="http://127.0.0.1:8000/v1",
+                teacher_api_key="",
+                teacher_model="mock-model",
+                teacher_backend="chat",
+                rollout_server_urls="",
+                rollout_host="",
+                rollout_base_port="",
+                rollout_n_servers="",
+                embed_backend="hash",
+                embed_base_url="",
+                embed_api_key="",
+                embed_model="",
+                timeout=60.0,
+                temperature=0.2,
+                top_p=0.95,
+                top_k=50,
+                max_tokens=512,
+                hash_dim=128,
+                cluster_similarity_threshold=0.0,
+                refine_singletons=False,
+                fail_on_error=True,
+            )
+
+            def fake_teacher(messages, **kwargs):
+                return _teacher_output(
+                    "Reverse operations in order",
+                    "When solving simple equations, remove outer operations one at a time.",
+                    "Undo the operations in reverse order and always substitute the result back to verify it satisfies the original equation.",
+                )
+
+            with mock.patch("baselines.ReasoningBankMath.refine_memory.chat_complete", side_effect=fake_teacher):
+                rc = run_refine_memory(args)
+            self.assertEqual(rc, 0)
+            merged = read_jsonl(refined_bank)
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["memory_items"][0]["title"], "Reverse operations in order")
+            self.assertEqual(len(merged[0]["provenance"]), 2)
+            self.assertTrue(refined_emb.is_file())
 
     def test_end_to_end_build_retrieve_evolve(self) -> None:
         with tempfile.TemporaryDirectory() as td:

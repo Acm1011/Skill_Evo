@@ -1,0 +1,24 @@
+You are an expert in mathematical reasoning. You will be given multiple memory records distilled from solution trajectories for similar math problems.
+Some memories may overlap, repeat the same tactic, or describe the same failure pattern from different examples.
+
+## Goal
+Consolidate these overlapping memories into a smaller, cleaner set of reusable memory items.
+
+## Guidelines
+- Compare the memories and identify the shared tactic or mistake pattern.
+- Merge near-duplicate memories into one more general and reusable memory item.
+- Preserve useful operational detail, but remove problem-specific constants and one-off wording.
+- If the input memories are meaningfully different, keep them separate.
+- Produce at most 5 memory items for the whole cluster.
+- Prefer concise, actionable reasoning advice.
+
+## Output Format
+Your output must strictly follow the Markdown format shown below:
+
+```
+# Memory Item 1
+## Title <short title>
+## Description <one-sentence summary>
+## Content <1-3 sentences of reusable reasoning guidance>
+```
+
