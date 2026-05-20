@@ -11,6 +11,7 @@ from baselines.ReasoningBankMath.build_embeddings import run_build_embeddings
 from baselines.ReasoningBankMath.build_memory import run_build_memory
 from baselines.ReasoningBankMath.compact_memory import run_compact_memory
 from baselines.ReasoningBankMath.evolve_memory import run_evolve_memory
+from baselines.ReasoningBankMath.prepare_prompt_data import run_prepare_prompt_data
 from baselines.ReasoningBankMath.refine_memory import run_refine_memory
 from baselines.ReasoningBankMath.io_utils import read_jsonl
 from baselines.ReasoningBankMath.memory_bank import dedupe_records, load_trajectories
@@ -248,6 +249,117 @@ class ReasoningBankMathTests(unittest.TestCase):
             self.assertEqual(merged[0]["memory_items"][0]["title"], "Reverse operations in order")
             self.assertEqual(len(merged[0]["provenance"]), 2)
             self.assertTrue(refined_emb.is_file())
+
+    def test_prepare_prompt_data_outputs_jsonl_and_parquet(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            input_jsonl = tmp / "temp_data.jsonl"
+            memory_bank = tmp / "memory_bank.jsonl"
+            embeddings = tmp / "memory_embeddings.jsonl"
+            out_jsonl = tmp / "out.jsonl"
+            out_parquet = tmp / "out.parquet"
+
+            input_jsonl.write_text(
+                json.dumps(
+                    {
+                        "question": "Solve x + 2 = 5",
+                        "gt": "3",
+                        "extra_info": {"topic": "Math->Algebra", "difficulty": 1},
+                        "idx": 10,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            memory_bank.write_text(
+                json.dumps(
+                    {
+                        "memory_id": "mem_001",
+                        "query": "Solve x + 7 = 10",
+                        "topic": "Math->Algebra",
+                        "topic_key": "Math_Algebra",
+                        "status": "success",
+                        "embedding_text": "Question: Solve x + 7 = 10\nIsolate the variable",
+                        "memory_items": [
+                            {
+                                "title": "Isolate the variable",
+                                "description": "Undo operations in reverse order.",
+                                "content": "Reverse the outer operation and substitute the result back into the original equation.",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            embeddings.write_text(
+                json.dumps(
+                    {
+                        "memory_id": "mem_001",
+                        "text": "Question: Solve x + 7 = 10\nIsolate the variable",
+                        "embedding": [1.0, 0.0, 0.0, 0.0],
+                        "backend": "hash",
+                        "model": "hash-4",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            args = argparse.Namespace(
+                input_jsonl=str(input_jsonl),
+                memory_bank=str(memory_bank),
+                embeddings=str(embeddings),
+                start=0,
+                end=None,
+                top_k=1,
+                embed_backend="hash",
+                embed_base_url="",
+                embed_api_key="",
+                embed_model="",
+                timeout=60.0,
+                hash_dim=4,
+                topic_bonus=0.05,
+                data_source="temp_data",
+                output_jsonl=str(out_jsonl),
+                output_parquet=str(out_parquet),
+                keep_raw_prompt=False,
+                keep_raw_row=False,
+            )
+
+            with mock.patch(
+                "baselines.ReasoningBankMath.prepare_prompt_data.retrieve_records",
+                return_value=[
+                    (
+                        {
+                            "memory_id": "mem_001",
+                            "topic_key": "Math_Algebra",
+                            "status": "success",
+                            "memory_items": [
+                                {
+                                    "title": "Isolate the variable",
+                                    "description": "Undo operations in reverse order.",
+                                    "content": "Reverse the outer operation and substitute the result back into the original equation.",
+                                }
+                            ],
+                        },
+                        0.99,
+                    )
+                ],
+            ):
+                rc = run_prepare_prompt_data(args)
+            self.assertEqual(rc, 0)
+            lines = out_jsonl.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            rec = json.loads(lines[0])
+            self.assertEqual(rec["extra_info"]["retrieved_memory_count"], 1)
+            self.assertEqual(rec["extra_info"]["retrieved_memory_ids"], ["mem_001"])
+            self.assertIn("Solve x + 2 = 5", rec["prompt"][0]["content"])
+            self.assertIn("Isolate the variable", rec["prompt"][0]["content"])
+            self.assertTrue(out_parquet.is_file())
 
     def test_end_to_end_build_retrieve_evolve(self) -> None:
         with tempfile.TemporaryDirectory() as td:
