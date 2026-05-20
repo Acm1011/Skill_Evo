@@ -312,43 +312,23 @@ class ReasoningBankMathTests(unittest.TestCase):
             args = argparse.Namespace(
                 input_jsonl=str(input_jsonl),
                 memory_bank=str(memory_bank),
-                embeddings=str(embeddings),
                 start=0,
                 end=None,
                 top_k=1,
-                embed_backend="hash",
-                embed_base_url="",
-                embed_api_key="",
-                embed_model="",
-                timeout=60.0,
-                hash_dim=4,
-                topic_bonus=0.05,
+                retriever_url="http://127.0.0.1:8766",
+                mode="embedding",
+                retrieve_lambda=0.5,
                 data_source="temp_data",
                 output_jsonl=str(out_jsonl),
                 output_parquet=str(out_parquet),
                 keep_raw_prompt=False,
                 keep_raw_row=False,
+                fail_on_retrieve_error=True,
             )
 
             with mock.patch(
-                "baselines.ReasoningBankMath.prepare_prompt_data.retrieve_records",
-                return_value=[
-                    (
-                        {
-                            "memory_id": "mem_001",
-                            "topic_key": "Math_Algebra",
-                            "status": "success",
-                            "memory_items": [
-                                {
-                                    "title": "Isolate the variable",
-                                    "description": "Undo operations in reverse order.",
-                                    "content": "Reverse the outer operation and substitute the result back into the original equation.",
-                                }
-                            ],
-                        },
-                        0.99,
-                    )
-                ],
+                "baselines.ReasoningBankMath.prepare_prompt_data._post_rank",
+                return_value=[0],
             ):
                 rc = run_prepare_prompt_data(args)
             self.assertEqual(rc, 0)
