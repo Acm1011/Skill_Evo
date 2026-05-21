@@ -217,6 +217,32 @@ print(f"规范化评测数据: {src_file} -> {dst_file}")
 PY
 }
 
+is_valid_response_parquet() {
+    local parquet_file="$1"
+
+    [ -f "$parquet_file" ] || return 1
+
+    python - "$parquet_file" <<'PY'
+import sys
+import pandas as pd
+
+parquet_file = sys.argv[1]
+
+try:
+    df = pd.read_parquet(parquet_file, columns=None)
+except Exception as exc:
+    print(f"invalid parquet read failed: {parquet_file}: {exc}")
+    raise SystemExit(1)
+
+columns = set(df.columns)
+has_required = {"data_source", "problem"} <= columns
+has_prompt = "formatted_prompt" in columns or "prompt" in columns
+has_responses = "responses" in columns or "response" in columns
+
+raise SystemExit(0 if (has_required and has_prompt and has_responses) else 1)
+PY
+}
+
 normalize_eval_parquet "${TEMP_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/temp_data.parquet"
 normalize_eval_parquet "${GREEDY_DATA_FILE}" "${CUSTOM_EVAL_DATA_DIR}/greedy_data.parquet"
 
@@ -453,12 +479,15 @@ check_main_task_completed() {
         result_file="${eval_saved_path_dir}/${model_name}/${dataset}_Overall_results.jsonl"
     fi
     
-    if [ -f "$result_file" ]; then
+    if is_valid_response_parquet "$result_file"; then
         echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Main task [${dataset}] for model [${model_name}] already completed"
         return 0
-    else
-        return 1
     fi
+
+    if [ -f "$result_file" ]; then
+        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Warning: found invalid/incomplete result file, will rerun: ${result_file}"
+    fi
+    return 1
 }
 
 start_additional_eval_job() {

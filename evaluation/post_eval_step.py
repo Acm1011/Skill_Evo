@@ -205,6 +205,77 @@ def convert_to_json_serializable(obj):
         return obj
 
 
+def maybe_parse_json(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+
+def normalize_dataset_schema(dataset: pd.DataFrame) -> pd.DataFrame:
+    dataset = dataset.copy()
+
+    for column in ("prompt", "formatted_prompt", "extra_info", "reward_model", "responses", "response"):
+        if column in dataset.columns:
+            dataset[column] = dataset[column].map(maybe_parse_json)
+
+    if "formatted_prompt" not in dataset.columns and "prompt" in dataset.columns:
+        dataset["formatted_prompt"] = dataset["prompt"]
+
+    if "responses" not in dataset.columns and "response" in dataset.columns:
+        dataset["responses"] = dataset["response"]
+
+    if "responses" in dataset.columns:
+        def ensure_response_list(value):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, list):
+                return value
+            if pd.isna(value):
+                return []
+            return [value]
+
+        dataset["responses"] = dataset["responses"].map(ensure_response_list)
+
+    if "extra_info" not in dataset.columns:
+        dataset["extra_info"] = [{"idx": i} for i in range(len(dataset))]
+    else:
+        def ensure_extra_info(value, idx):
+            if isinstance(value, dict):
+                value.setdefault("idx", idx)
+                return value
+            return {"idx": idx}
+
+        dataset["extra_info"] = [
+            ensure_extra_info(value, idx) for idx, value in enumerate(dataset["extra_info"])
+        ]
+
+    if "reward_model" in dataset.columns:
+        def ensure_reward_model(value):
+            if isinstance(value, dict):
+                return value
+            return {"ground_truth": value}
+
+        dataset["reward_model"] = dataset["reward_model"].map(ensure_reward_model)
+
+    return dataset
+
+
+def get_ground_truth(data_item):
+    reward_model = data_item.get("reward_model")
+    if isinstance(reward_model, dict) and "ground_truth" in reward_model:
+        return reward_model["ground_truth"]
+    if "ground_truth" in data_item:
+        return data_item["ground_truth"]
+    if "answer" in data_item:
+        return data_item["answer"]
+    raise KeyError("missing ground truth: neither reward_model.ground_truth nor ground_truth/answer column exists")
+
+
 def post_eval(save_path_dir, dataset_name, model_name, n_samples, temperature, step=None):
     """
     后处理评测结果
@@ -248,18 +319,29 @@ def post_eval(save_path_dir, dataset_name, model_name, n_samples, temperature, s
     
     dataset = pd.read_parquet(save_path)
     print(f'加载响应文件: {save_path}, 共 {len(dataset)} 条数据')
-    
-    assert 'formatted_prompt' in dataset.columns and 'reward_model' in dataset.columns and \
-           'data_source' in dataset.columns and 'problem' in dataset.columns and \
-           'responses' in dataset.columns, \
-           f'数据集列不正确，请检查数据集'
+
+    dataset = normalize_dataset_schema(dataset)
+
+    required_columns = ['formatted_prompt', 'data_source', 'problem', 'responses']
+    missing_columns = [col for col in required_columns if col not in dataset.columns]
+    has_ground_truth = (
+        'reward_model' in dataset.columns or
+        'ground_truth' in dataset.columns or
+        'answer' in dataset.columns
+    )
+    if missing_columns or not has_ground_truth:
+        columns_str = ', '.join(map(str, dataset.columns.tolist()))
+        raise ValueError(
+            f'数据集列不正确，缺失列={missing_columns}，'
+            f'ground_truth可用={has_ground_truth}，当前列=[{columns_str}]'
+        )
    
     final_results = []
    
     with ThreadPoolExecutor(max_workers=min(os.cpu_count(), 100)) as executor:
         args = [
             (i, data_item['extra_info']['idx'], data_item['data_source'], data_item['problem'], 
-             data_item['formatted_prompt'], data_item['responses'], data_item['reward_model']['ground_truth'])
+             data_item['formatted_prompt'], data_item['responses'], get_ground_truth(data_item))
             for i, (_, data_item) in enumerate(dataset.iterrows())
         ]
         futures = [executor.submit(process_data_item, arg) for arg in args]
