@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
-# DAPO-like (parameter-only) variant based on run_qwen3-8b_GRPO.sh
-# Note: this does not switch to recipe.dapo.main_dapo / RayDAPOTrainer.
+# DAPO baseline variant based on run_qwen3-8b_GRPO.sh
+# This version runs through recipe.dapo.main_dapo / RayDAPOTrainer so
+# algorithm.filter_groups.* and reward_model.overlong_buffer.* both take effect.
 
 set -x
 CUDA_VISIBLE_DEVICES=0,1,2,3
 export CUDA_VISIBLE_DEVICES
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
 # =============================================================================
 # 路径与实验命名
 # =============================================================================
-WORK_DIR="/home/ycy/sdi/skill_saved/Skill_Evo/baseline"
-TENSORBOARD_DIR="/home/ycy/sdi/skill_saved/Skill_Evo/baseline/tensorboard_log/dapo_like_qwen3_4b"
+OUTPUT_DIR="/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/dapo_qwen3_4b"
+TENSORBOARD_DIR="/home/ycy/sdi/skill_saved/Skill_Evo/baseline/tensorboard_log/dapo_qwen3_4b"
 TRAIN_FILES="/home/ycy/sdi/data/train_data.parquet"
 VAL_FILES="/home/ycy/sdi/data/temp_data.parquet"
 MODEL_PATH="/home/ycy/sdi/models/Qwen3-4B-Instruct-2507"
-PROJECT_NAME='verl_dapo_like_qwen3_4b'
-EXPERIMENT_NAME='dapo_like_qwen3_4b'
+PROJECT_NAME='verl_dapo_qwen3_4b'
+EXPERIMENT_NAME='dapo_qwen3_4b'
 
 # =============================================================================
 # 数据
 # =============================================================================
 TRAIN_BATCH_SIZE=128
+GEN_BATCH_SIZE=384
 MAX_PROMPT_LENGTH=512
 MAX_RESPONSE_LENGTH=4096
 FILTER_OVERLONG_PROMPTS=True
@@ -53,12 +58,16 @@ REF_PARAM_OFFLOAD=True
 USE_KL_IN_REWARD=False
 
 # =============================================================================
-# DAPO-like parameters (main_ppo only)
+# DAPO parameters
 # =============================================================================
 REWARD_MANAGER='dapo'
+ENABLE_OVERLONG_BUFFER=True
+OVERLONG_BUFFER_LEN=512
+OVERLONG_PENALTY_FACTOR=1.0
 ENABLE_FILTER_GROUPS=True
 FILTER_GROUPS_METRIC='acc'
 MAX_NUM_GEN_BATCHES=10
+LOSS_AGG_MODE='token-mean'
 
 # =============================================================================
 # Trainer
@@ -74,14 +83,16 @@ TEST_FREQ=10
 TOTAL_EPOCHS=15
 
 # =============================================================================
-cd "${WORK_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${TENSORBOARD_DIR}"
+cd "${REPO_ROOT}"
 export TENSORBOARD_DIR
 
-python3 -m verl.trainer.main_ppo \
+python3 -m recipe.dapo.main_dapo \
     algorithm.adv_estimator=grpo \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
+    data.gen_batch_size="${GEN_BATCH_SIZE}" \
     data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
     data.max_response_length="${MAX_RESPONSE_LENGTH}" \
     data.filter_overlong_prompts="${FILTER_OVERLONG_PROMPTS}" \
@@ -113,6 +124,10 @@ python3 -m verl.trainer.main_ppo \
     algorithm.filter_groups.metric="${FILTER_GROUPS_METRIC}" \
     algorithm.filter_groups.max_num_gen_batches="${MAX_NUM_GEN_BATCHES}" \
     reward_model.reward_manager="${REWARD_MANAGER}" \
+    reward_model.overlong_buffer.enable="${ENABLE_OVERLONG_BUFFER}" \
+    reward_model.overlong_buffer.len="${OVERLONG_BUFFER_LEN}" \
+    reward_model.overlong_buffer.penalty_factor="${OVERLONG_PENALTY_FACTOR}" \
+    actor_rollout_ref.actor.loss_agg_mode="${LOSS_AGG_MODE}" \
     trainer.critic_warmup="${CRITIC_WARMUP}" \
     trainer.logger="${TRAINER_LOGGER}" \
     trainer.project_name="${PROJECT_NAME}" \
@@ -122,5 +137,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node="${N_GPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
     trainer.save_freq="${SAVE_FREQ}" \
-    trainer.test_freq=-1 \
-    trainer.total_epochs="${TOTAL_EPOCHS}" "$@"
+    trainer.test_freq="${TEST_FREQ}" \
+    trainer.total_epochs="${TOTAL_EPOCHS}" \
+    trainer.default_local_dir="${OUTPUT_DIR}" "$@"
