@@ -667,13 +667,21 @@ check_completed_jobs() {
         
         if ! kill -0 "$pid" 2>/dev/null; then
             local model_name="${model_gpu_mapping[$gpu_id]}"
+            local exit_code=0
+            if wait "$pid"; then
+                exit_code=0
+            else
+                exit_code=$?
+            fi
             
             if [ -z "${task_completed[$gpu_id]:-}" ]; then
                 local dataset="${gpu_dataset[$gpu_id]}"
-                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [DONE] GPU [${gpu_id}] finished: [${dataset}] for [${model_name}] (PID ${pid})"
+                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [DONE] GPU [${gpu_id}] finished: [${dataset}] for [${model_name}] (PID ${pid}, exit=${exit_code})"
                 task_completed["$gpu_id"]=1
-                
-                if [[ " ${TASKS[@]} " =~ " ${dataset} " ]]; then
+
+                if [ "$exit_code" -ne 0 ]; then
+                    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] Generation failed for [${model_name}] on [${dataset}] (exit=${exit_code}), skipping post_eval_step"
+                elif [[ " ${TASKS[@]} " =~ " ${dataset} " ]]; then
                     local n_samples=32
                     local temp=$TEMPERATURE
                     if [ "$dataset" == "greedy_data" ]; then
