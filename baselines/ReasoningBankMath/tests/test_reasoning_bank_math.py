@@ -474,7 +474,7 @@ class ReasoningBankMathTests(unittest.TestCase):
 
             all_steps = json.loads((root.parent / "all_steps_aggregated_results.json").read_text(encoding="utf-8"))
             self.assertEqual(len(all_steps), 1)
-            self.assertEqual(all_steps[0]["step"], None)
+            self.assertEqual(all_steps[0]["step"], 200)
 
             table_csv = root.parent / "eval_results_table.csv"
             table_md = root.parent / "eval_results_table.md"

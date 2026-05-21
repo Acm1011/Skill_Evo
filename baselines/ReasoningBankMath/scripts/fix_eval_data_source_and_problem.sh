@@ -435,6 +435,14 @@ def get_all_steps(save_path_dir: str) -> List[Tuple[int, str]]:
     return steps
 
 
+def infer_step_num_from_path(path: str) -> Optional[int]:
+    name = os.path.basename(os.path.abspath(path))
+    match = re.match(r"^step_(\d+)$", name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def rebuild_experiment_summary(exp_dir: str) -> None:
     steps = get_all_steps(exp_dir)
     if not steps:
@@ -448,7 +456,12 @@ def rebuild_experiment_summary(exp_dir: str) -> None:
         step_agg_path = os.path.join(step_dir, "aggregated_eval_results.json")
         if os.path.exists(step_agg_path):
             with open(step_agg_path, "r", encoding="utf-8") as f:
-                all_results.append(json.load(f))
+                payload = json.load(f)
+            step_val = payload.get("step")
+            if step_val is None:
+                step_val = infer_step_num_from_path(step_dir)
+                payload["step"] = step_val
+            all_results.append(payload)
 
         for dataset_path, dataset_type in (
             (os.path.join(step_dir, "greedy_data_Overall_results.jsonl"), 1),
@@ -465,7 +478,14 @@ def rebuild_experiment_summary(exp_dir: str) -> None:
                 if data_source:
                     math_datasets_set.add((dataset_type, data_source))
 
-    all_results.sort(key=lambda x: x.get("step", -1))
+    def normalized_step(payload: Dict[str, Any]) -> int:
+        step_val = payload.get("step")
+        if step_val is None:
+            inferred = infer_step_num_from_path(payload.get("step_dir", ""))
+            return inferred if inferred is not None else -1
+        return int(step_val)
+
+    all_results.sort(key=normalized_step)
     all_steps_path = os.path.join(exp_dir, "all_steps_aggregated_results.json")
     with open(all_steps_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
