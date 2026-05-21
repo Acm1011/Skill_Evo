@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import pandas as pd
 
 from baselines.ReasoningBankMath.build_embeddings import run_build_embeddings
 from baselines.ReasoningBankMath.build_memory import run_build_memory
@@ -343,6 +346,131 @@ class ReasoningBankMathTests(unittest.TestCase):
             self.assertIn("Solve x + 2 = 5", rec["prompt"][0]["content"])
             self.assertIn("Isolate the variable", rec["prompt"][0]["content"])
             self.assertTrue(out_parquet.is_file())
+
+    def test_fix_eval_data_source_and_problem_repairs_existing_eval_outputs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[3]
+        script = repo_root / "baselines" / "ReasoningBankMath" / "scripts" / "fix_eval_data_source_and_problem.sh"
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            root = tmp / "eval" / "step_200"
+            root.mkdir(parents=True)
+
+            temp_input = tmp / "temp_data.jsonl"
+            temp_problem = "Solve x + 2 = 5"
+            temp_input.write_text(
+                json.dumps(
+                    {
+                        "data_source": "AIME24",
+                        "problem": temp_problem,
+                        "reward_model": {"ground_truth": ["3"]},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            greedy_input = tmp / "greedy_data.jsonl"
+            greedy_problem = "What is 6 * 7?"
+            greedy_input.write_text(
+                json.dumps(
+                    {
+                        "data_source": "AMC23",
+                        "problem": greedy_problem,
+                        "reward_model": {"ground_truth": ["42"]},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            pd.DataFrame(
+                [
+                    {
+                        "data_source": "temp_data",
+                        "problem": temp_problem,
+                        "extra_info": {"problem": temp_problem},
+                        "reward_model": {"ground_truth": ["3"]},
+                        "responses": ["boxed 3"],
+                        "rule_scores": [1.0],
+                        "checked_scores": [1.0],
+                    }
+                ]
+            ).to_parquet(root / "temp_data_responses.parquet", index=False)
+
+            pd.DataFrame(
+                [
+                    {
+                        "data_source": "greedy_data",
+                        "problem": greedy_problem,
+                        "extra_info": {"problem": greedy_problem},
+                        "reward_model": {"ground_truth": ["42"]},
+                        "responses": ["boxed 42"],
+                        "rule_scores": [1.0],
+                        "checked_scores": [1.0],
+                    }
+                ]
+            ).to_parquet(root / "greedy_data_responses.parquet", index=False)
+
+            (root / "temp_data_meta.json").write_text(
+                json.dumps({"model_name": "mock-model", "n_samples": 1, "temperature": 0.7}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (root / "greedy_data_meta.json").write_text(
+                json.dumps({"model_name": "mock-model", "n_samples": 1, "temperature": 0.0}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (root / "temp_data_Overall_results.jsonl").write_text(
+                json.dumps({"data_source": "temp_data", "model": "mock-model", "checked_mean@1": "0.00"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            (root / "greedy_data_Overall_results.jsonl").write_text(
+                json.dumps({"data_source": "greedy_data", "model": "mock-model", "checked_mean@1": "0.00"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--root",
+                    str(root),
+                    "--temp-input",
+                    str(temp_input),
+                    "--greedy-input",
+                    str(greedy_input),
+                ],
+                cwd=repo_root,
+                check=True,
+            )
+
+            temp_df = pd.read_parquet(root / "temp_data_responses.parquet")
+            greedy_df = pd.read_parquet(root / "greedy_data_responses.parquet")
+            self.assertEqual(temp_df.iloc[0]["data_source"], "AIME24")
+            self.assertEqual(greedy_df.iloc[0]["data_source"], "AMC23")
+            self.assertEqual(temp_df.iloc[0]["extra_info"]["data_source"], "AIME24")
+            self.assertEqual(greedy_df.iloc[0]["extra_info"]["data_source"], "AMC23")
+
+            temp_overall = [
+                json.loads(line)
+                for line in (root / "temp_data_Overall_results.jsonl").read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            greedy_overall = [
+                json.loads(line)
+                for line in (root / "greedy_data_Overall_results.jsonl").read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            self.assertEqual(temp_overall[0]["data_source"], "AIME24")
+            self.assertEqual(greedy_overall[0]["data_source"], "AMC23")
+            self.assertEqual(temp_overall[0]["checked_mean@1"], "100.00")
+            self.assertEqual(greedy_overall[0]["checked_mean@1"], "100.00")
+
+            aggregate = json.loads((root / "aggregated_eval_results.json").read_text(encoding="utf-8"))
+            self.assertIn("AIME24", aggregate["math_datasets"])
+            self.assertIn("AMC23", aggregate["math_datasets"])
 
     def test_end_to_end_build_retrieve_evolve(self) -> None:
         with tempfile.TemporaryDirectory() as td:

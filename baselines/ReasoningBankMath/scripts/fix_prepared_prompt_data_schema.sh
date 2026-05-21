@@ -18,6 +18,10 @@ What it does:
   into evaluation-compatible:
     temp_data.{jsonl,parquet}
     greedy_data.{jsonl,parquet}
+
+Important:
+  Preserve the original per-example data_source when it already exists.
+  Only fall back to temp_data / greedy_data when the old file truly lacks it.
 USAGE
 }
 
@@ -62,11 +66,18 @@ def norm_rec(rec, dataset_name):
         rm = rec.get("reward_model")
         if isinstance(rm, dict):
             gt = rm.get("ground_truth")
+    data_source = rec.get("data_source") or extra.get("data_source") or dataset_name
     rec["problem"] = problem
     rec["ground_truth"] = gt
-    rec["data_source"] = dataset_name
+    rec["data_source"] = data_source
     if "reward_model" not in rec or not isinstance(rec["reward_model"], dict):
         rec["reward_model"] = {"ground_truth": gt}
+    elif rec["reward_model"].get("ground_truth") is None:
+        rec["reward_model"]["ground_truth"] = gt
+    if not isinstance(rec.get("extra_info"), dict):
+        rec["extra_info"] = {}
+    rec["extra_info"]["problem"] = problem
+    rec["extra_info"]["data_source"] = data_source
     return rec
 
 for src, dst in [

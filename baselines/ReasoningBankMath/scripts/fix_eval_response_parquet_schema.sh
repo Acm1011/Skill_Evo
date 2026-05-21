@@ -15,6 +15,10 @@ What it does:
   Patch existing step_* response parquet files in-place so they match the
   evaluation pipeline schema expected by post_eval_step.py.
 
+Important:
+  Preserve the original per-example data_source when it already exists.
+  Only fall back to temp_data / greedy_data when the parquet truly lacks it.
+
 Targets:
   step_*/temp_data_responses.parquet
   step_*/greedy_data_responses.parquet
@@ -81,10 +85,11 @@ def normalize_df(df, dataset_name):
         if col in df.columns:
             df[col] = df[col].map(maybe_parse_json)
 
-    if "problem" not in df.columns and "extra_info" in df.columns:
-        df["problem"] = df["extra_info"].map(
-            lambda x: x.get("problem") if isinstance(x, dict) else None
-        )
+    if "problem" not in df.columns:
+        if "extra_info" in df.columns:
+            df["problem"] = df["extra_info"].map(
+                lambda x: x.get("problem") if isinstance(x, dict) else None
+            )
 
     if "ground_truth" not in df.columns:
         if "reward_model" in df.columns:
@@ -92,7 +97,15 @@ def normalize_df(df, dataset_name):
                 lambda x: x.get("ground_truth") if isinstance(x, dict) else x
             )
 
-    df["data_source"] = dataset_name
+    if "extra_info" in df.columns:
+        def extract_data_source(row):
+            extra = row.get("extra_info")
+            extra_source = extra.get("data_source") if isinstance(extra, dict) else None
+            current = row.get("data_source")
+            return current or extra_source or dataset_name
+        df["data_source"] = df.apply(extract_data_source, axis=1)
+    elif "data_source" not in df.columns:
+        df["data_source"] = dataset_name
 
     if "responses" not in df.columns and "response" in df.columns:
         df["responses"] = df["response"]
