@@ -430,6 +430,36 @@ class ReasoningBankMathTests(unittest.TestCase):
                 json.dumps({"data_source": "greedy_data", "model": "mock-model", "checked_mean@1": "0.00"}, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
+            (root / "temp_data_eval_results.jsonl").write_text(
+                json.dumps(
+                    {
+                        "idx": 0,
+                        "data_source": "temp_data",
+                        "problem": temp_problem,
+                        "raw_scores": [1.0],
+                        "rule_scores": [1.0],
+                        "checked_scores": [1.0],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / "greedy_data_eval_results.jsonl").write_text(
+                json.dumps(
+                    {
+                        "idx": 0,
+                        "data_source": "greedy_data",
+                        "problem": greedy_problem,
+                        "raw_scores": [1.0],
+                        "rule_scores": [1.0],
+                        "checked_scores": [1.0],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             subprocess.run(
                 [

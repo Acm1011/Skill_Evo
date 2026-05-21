@@ -184,6 +184,28 @@ def get_ground_truth(row: Dict[str, Any]) -> Any:
     return rm.get("ground_truth")
 
 
+def patch_eval_results_jsonl(path: str, dataset_name: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            problem = normalize_problem(rec.get("problem"))
+            data_source = infer_data_source(problem, dataset_name, current=rec.get("data_source"))
+            rec["problem"] = problem
+            rec["data_source"] = data_source
+            rows.append(rec)
+
+    write_jsonl(path, rows)
+    print(f"[fix-eval-data-source] patched eval results: {path}")
+    return rows
+
+
 def patch_responses_parquet(path: str, dataset_name: str) -> Optional[pd.DataFrame]:
     df = pd.read_parquet(path)
     for col in ("prompt", "formatted_prompt", "extra_info", "reward_model", "responses", "response"):
@@ -313,6 +335,62 @@ def build_overall_rows(df: pd.DataFrame, dataset_name: str, meta: Dict[str, Any]
         rows.append(row)
 
     rows.sort(key=lambda x: x["data_source"])
+    return rows
+
+
+def build_overall_rows_from_eval_records(records: List[Dict[str, Any]], meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    model_name = meta.get("model_name") or meta.get("model") or ""
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for rec in records:
+        grouped.setdefault(str(rec.get("data_source") or "unknown"), []).append(rec)
+
+    for data_source, recs in sorted(grouped.items()):
+        sample_counts = []
+        for rec in recs:
+            raw_scores = ensure_list(rec.get("raw_scores"))
+            rule_scores = ensure_list(rec.get("rule_scores"))
+            checked_scores = ensure_list(rec.get("checked_scores"))
+            sample_counts.append(max(len(raw_scores), len(rule_scores), len(checked_scores), 1))
+        n_samples = max(sample_counts) if sample_counts else int(meta.get("n_samples") or 1)
+
+        def mean_at(key: str, idx: int) -> float:
+            vals = []
+            for rec in recs:
+                seq = ensure_list(rec.get(key))
+                if idx < len(seq):
+                    vals.append(float(seq[idx]))
+            return (sum(vals) / len(vals)) if vals else 0.0
+
+        rule_first = mean_at("rule_scores", 0)
+        checked_first = mean_at("checked_scores", 0)
+        rule_mean = sum(mean_at("rule_scores", i) for i in range(n_samples)) / n_samples
+        checked_mean = sum(mean_at("checked_scores", i) for i in range(n_samples)) / n_samples
+        checked_sample_mean = 0.0
+        total_checked = 0.0
+        total_count = 0
+        for rec in recs:
+            seq = ensure_list(rec.get("checked_scores"))
+            total_checked += sum(float(x) for x in seq)
+            total_count += len(seq)
+        if total_count > 0:
+            checked_sample_mean = total_checked / total_count
+
+        row: Dict[str, Any] = {
+            "data_source": data_source,
+            "model": model_name,
+            "step": meta.get("step"),
+            "rule@first": f"{rule_first * 100:.2f}",
+            f"rule_mean@{n_samples}": f"{rule_mean * 100:.2f}",
+            f"checked_sample_mean@{n_samples}": f"{checked_sample_mean * 100:.2f}",
+            "checked@first": f"{checked_first * 100:.2f}",
+            f"checked_mean@{n_samples}": f"{checked_mean * 100:.2f}",
+            "n_samples": n_samples,
+            "temperature": meta.get("temperature"),
+        }
+        rows.append(row)
+
     return rows
 
 
@@ -629,13 +707,21 @@ for step_dir in step_dirs:
         parquet_path = os.path.join(step_dir, f"{dataset_name}_responses.parquet")
         meta_path = os.path.join(step_dir, f"{dataset_name}_meta.json")
         overall_path = os.path.join(step_dir, f"{dataset_name}_Overall_results.jsonl")
+        eval_results_path = os.path.join(step_dir, f"{dataset_name}_eval_results.jsonl")
 
-        if not os.path.exists(parquet_path):
-            continue
-
-        df = patch_responses_parquet(parquet_path, dataset_name)
         meta = load_json(meta_path)
-        rows = build_overall_rows(df, dataset_name, meta)
+        if os.path.exists(parquet_path):
+            patch_responses_parquet(parquet_path, dataset_name)
+
+        eval_records = patch_eval_results_jsonl(eval_results_path, dataset_name)
+        if eval_records:
+            rows = build_overall_rows_from_eval_records(eval_records, meta)
+        else:
+            if not os.path.exists(parquet_path):
+                continue
+            df = patch_responses_parquet(parquet_path, dataset_name)
+            rows = build_overall_rows(df, dataset_name, meta)
+
         write_jsonl(overall_path, rows)
         print(f"[fix-eval-data-source] rebuilt overall: {overall_path}")
 
