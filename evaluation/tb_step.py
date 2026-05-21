@@ -67,7 +67,7 @@ def read_math_eval(path, greedy=False):
 
 
 def read_aggregated_eval(eval_path):
-    """读取三个新数据集的聚合评测结果"""
+    """读取额外评测数据集的聚合评测结果"""
     res = {}
     general_avg_data = []
     aggregated_path = os.path.join(eval_path, 'aggregated_eval_results.json')
@@ -78,7 +78,9 @@ def read_aggregated_eval(eval_path):
     try:
         with open(aggregated_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            datasets = data.get('datasets', {})
+            datasets = data.get('datasets')
+            if datasets is None:
+                datasets = data.get('additional_datasets', {})
             
             for dataset_name in ['bbeh', 'mmlupro', 'supergpqa']:
                 if dataset_name in datasets:
