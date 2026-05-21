@@ -22,6 +22,10 @@ What it does:
      - greedy_data_Overall_results.jsonl
      - aggregated_eval_results.json
   3. Recompute per-data_source Overall results from the patched parquet files.
+  4. Rebuild experiment-level summaries when step_* directories are present:
+     - all_steps_aggregated_results.json
+     - <exp_name>_results_table.csv
+     - <exp_name>_results_table.md
 
 Notes:
   - This is intended for already-generated results whose data_source was
@@ -68,8 +72,10 @@ fi
 python - <<'PY' "${ROOT}" "${TEMP_INPUT}" "${GREEDY_INPUT}"
 import json
 import os
+import re
 import sys
-from typing import Any, Dict, Iterable, List, Optional
+from collections import OrderedDict
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -376,6 +382,204 @@ def aggregate_step_dir(step_dir: str) -> None:
     print(f"[fix-eval-data-source] rebuilt aggregate: {out_path}")
 
 
+def read_math_eval(path: str, greedy: bool = False) -> Tuple[Dict[str, float], List[float]]:
+    res: Dict[str, float] = {}
+    all_data: List[float] = []
+
+    if not os.path.exists(path):
+        return res, all_data
+
+    try:
+        eval_data = pd.read_json(path, lines=True).to_dict(orient="records")
+        for data_item in eval_data:
+            data_source = data_item.get("data_source", "unknown")
+            metric_key = "checked_mean@1" if greedy else "checked_mean@32"
+            alt_metric_key = None
+            if greedy and metric_key not in data_item:
+                alt_metric_key = "checked@first"
+            if not greedy and metric_key not in data_item:
+                for key in data_item.keys():
+                    if key.startswith("checked_mean@"):
+                        metric_key = key
+                        break
+
+            value = data_item.get(metric_key)
+            if value is None and alt_metric_key:
+                value = data_item.get(alt_metric_key)
+            if value is None:
+                value = 0
+            value = float(value)
+
+            if greedy:
+                res[f"checked_mean@1/{data_source}"] = value
+            else:
+                res[f"{metric_key}/{data_source}"] = value
+            all_data.append(value)
+    except Exception as e:
+        print(f"[fix-eval-data-source] warning: failed reading {path}: {e}")
+
+    return res, all_data
+
+
+def get_all_steps(save_path_dir: str) -> List[Tuple[int, str]]:
+    steps: List[Tuple[int, str]] = []
+    if os.path.exists(save_path_dir):
+        for name in os.listdir(save_path_dir):
+            path = os.path.join(save_path_dir, name)
+            if not os.path.isdir(path):
+                continue
+            match = re.match(r"^step_(\d+)$", name)
+            if match:
+                steps.append((int(match.group(1)), path))
+    steps.sort(key=lambda x: x[0])
+    return steps
+
+
+def rebuild_experiment_summary(exp_dir: str) -> None:
+    steps = get_all_steps(exp_dir)
+    if not steps:
+        return
+
+    all_general_datasets = ["bbeh", "mmlupro", "supergpqa"]
+    all_results = []
+    math_datasets_set = set()
+
+    for step_num, step_dir in steps:
+        step_agg_path = os.path.join(step_dir, "aggregated_eval_results.json")
+        if os.path.exists(step_agg_path):
+            with open(step_agg_path, "r", encoding="utf-8") as f:
+                all_results.append(json.load(f))
+
+        for dataset_path, dataset_type in (
+            (os.path.join(step_dir, "greedy_data_Overall_results.jsonl"), 1),
+            (os.path.join(step_dir, "temp_data_Overall_results.jsonl"), 2),
+        ):
+            if not os.path.exists(dataset_path):
+                continue
+            try:
+                eval_data = pd.read_json(dataset_path, lines=True).to_dict(orient="records")
+            except Exception:
+                continue
+            for data_item in eval_data:
+                data_source = data_item.get("data_source")
+                if data_source:
+                    math_datasets_set.add((dataset_type, data_source))
+
+    all_results.sort(key=lambda x: x.get("step", -1))
+    all_steps_path = os.path.join(exp_dir, "all_steps_aggregated_results.json")
+    with open(all_steps_path, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, ensure_ascii=False, indent=2)
+    print(f"[fix-eval-data-source] rebuilt experiment aggregate: {all_steps_path}")
+
+    sorted_math_datasets = sorted(math_datasets_set, key=lambda x: (x[1], x[0]))
+    all_math_datasets = []
+    for dataset_type, data_source in sorted_math_datasets:
+        if dataset_type == 1:
+            all_math_datasets.append(f"checked_mean@1/{data_source}")
+        else:
+            all_math_datasets.append(f"checked_mean@32/{data_source}")
+
+    table_data = []
+    for step_num, step_dir in steps:
+        row = OrderedDict()
+        row["Step"] = step_num
+
+        greedy_data_path = os.path.join(step_dir, "greedy_data_Overall_results.jsonl")
+        temp_data_path = os.path.join(step_dir, "temp_data_Overall_results.jsonl")
+        d1, avg_d1 = read_math_eval(greedy_data_path, greedy=True)
+        d2, avg_d2 = read_math_eval(temp_data_path, greedy=False)
+        math_values = avg_d1 + avg_d2
+
+        for key in all_math_datasets:
+            dataset_name = key.split("/", 1)[1]
+            if key.startswith("checked_mean@1/"):
+                value = d1.get(key)
+            else:
+                value = d2.get(key)
+            row[dataset_name] = round(float(value), 2) if value is not None else None
+
+        math_avg = sum(math_values) / len(math_values) if math_values else None
+        row["Math_AVG"] = round(math_avg, 2) if math_avg is not None else None
+
+        additional_eval_data = {}
+        general_avg_data: List[float] = []
+        step_agg_path = os.path.join(step_dir, "aggregated_eval_results.json")
+        if os.path.exists(step_agg_path):
+            with open(step_agg_path, "r", encoding="utf-8") as f:
+                step_data = json.load(f)
+            datasets = step_data.get("additional_datasets", {})
+            for dataset_name in all_general_datasets:
+                ds = datasets.get(dataset_name)
+                if not ds:
+                    continue
+                accuracy = ds.get("accuracy")
+                if accuracy is None:
+                    accuracy = ds.get("micro_accuracy")
+                if accuracy is not None:
+                    accuracy = float(accuracy)
+                    if accuracy <= 1.0:
+                        accuracy *= 100.0
+                    additional_eval_data[dataset_name] = round(accuracy, 2)
+                    general_avg_data.append(accuracy)
+
+        for dataset_name in all_general_datasets:
+            row[dataset_name] = additional_eval_data.get(dataset_name)
+
+        general_avg = sum(general_avg_data) / len(general_avg_data) if general_avg_data else None
+        row["General_AVG"] = round(general_avg, 2) if general_avg is not None else None
+
+        overall_values = math_values + general_avg_data
+        overall_avg = sum(overall_values) / len(overall_values) if overall_values else None
+        row["Overall_AVG"] = round(overall_avg, 2) if overall_avg is not None else None
+
+        table_data.append(row)
+
+    df = pd.DataFrame(table_data)
+    column_order = ["Step"]
+    column_order.extend([key.split("/", 1)[1] for key in all_math_datasets])
+    column_order.append("Math_AVG")
+    column_order.extend(all_general_datasets)
+    column_order.append("General_AVG")
+    column_order.append("Overall_AVG")
+    column_order = [col for col in column_order if col in df.columns]
+    df = df[column_order].sort_values("Step").reset_index(drop=True)
+
+    exp_name = os.path.basename(os.path.abspath(exp_dir.rstrip(os.sep)))
+    csv_path = os.path.join(exp_dir, f"{exp_name}_results_table.csv")
+    md_path = os.path.join(exp_dir, f"{exp_name}_results_table.md")
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    def dataframe_to_markdown(frame: pd.DataFrame) -> str:
+        try:
+            return frame.to_markdown(index=False)
+        except Exception:
+            headers = [str(col) for col in frame.columns]
+            rows = []
+            for _, rec in frame.iterrows():
+                vals = []
+                for col in frame.columns:
+                    val = rec[col]
+                    if pd.isna(val):
+                        vals.append("")
+                    else:
+                        vals.append(str(val))
+                rows.append(vals)
+            lines = []
+            lines.append("| " + " | ".join(headers) + " |")
+            lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+            for row in rows:
+                lines.append("| " + " | ".join(row) + " |")
+            return "\n".join(lines)
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("# Evaluation Results by Step\n\n")
+        f.write(f"Experiment: {exp_name}\n\n")
+        f.write(dataframe_to_markdown(df))
+        f.write("\n")
+    print(f"[fix-eval-data-source] rebuilt table: {csv_path}")
+    print(f"[fix-eval-data-source] rebuilt table: {md_path}")
+
+
 def maybe_step_dirs(root_dir: str) -> List[str]:
     if os.path.basename(root_dir).startswith("step_"):
         return [root_dir]
@@ -416,6 +620,12 @@ for step_dir in step_dirs:
         print(f"[fix-eval-data-source] rebuilt overall: {overall_path}")
 
     aggregate_step_dir(step_dir)
+
+exp_dir = root
+if os.path.basename(root).startswith("step_"):
+    exp_dir = os.path.dirname(root)
+if get_all_steps(exp_dir):
+    rebuild_experiment_summary(exp_dir)
 
 print(f"[fix-eval-data-source] done, processed {len(step_dirs)} directories")
 PY

@@ -472,6 +472,19 @@ class ReasoningBankMathTests(unittest.TestCase):
             self.assertIn("AIME24", aggregate["math_datasets"])
             self.assertIn("AMC23", aggregate["math_datasets"])
 
+            all_steps = json.loads((root.parent / "all_steps_aggregated_results.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(all_steps), 1)
+            self.assertEqual(all_steps[0]["step"], None)
+
+            table_csv = root.parent / "eval_results_table.csv"
+            table_md = root.parent / "eval_results_table.md"
+            self.assertTrue(table_csv.is_file())
+            self.assertTrue(table_md.is_file())
+
+            table_df = pd.read_csv(table_csv)
+            self.assertIn("AIME24", table_df.columns)
+            self.assertIn("AMC23", table_df.columns)
+
     def test_end_to_end_build_retrieve_evolve(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
