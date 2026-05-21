@@ -84,6 +84,18 @@ def extract_ground_truth(row: Dict[str, Any]) -> Any:
     return ""
 
 
+def extract_data_source(row: Dict[str, Any], default: str) -> str:
+    val = row.get("data_source")
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    extra = row.get("extra_info")
+    if isinstance(extra, dict):
+        val = extra.get("data_source")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return default
+
+
 def format_memory_prompt(rows: List[Dict[str, Any]]) -> str:
     if not rows:
         return "No relevant memories found."
@@ -268,6 +280,7 @@ def run_prepare_prompt_data(args: argparse.Namespace) -> int:
             topic = extract_topic(raw)
             topic_key = topic_slug(topic)
             gt = extract_ground_truth(raw)
+            data_source = extract_data_source(raw, args.data_source)
             try:
                 retrieved_rows = retrieve_memories(
                     question=problem,
@@ -307,9 +320,11 @@ def run_prepare_prompt_data(args: argparse.Namespace) -> int:
             ex["memory_candidates_count"] = len(candidates)
 
             rec: Dict[str, Any] = {
+                "problem": problem,
+                "ground_truth": gt,
                 "prompt": prompt,
                 "reward_model": {"ground_truth": gt},
-                "data_source": args.data_source,
+                "data_source": data_source,
                 "extra_info": ex,
             }
             if args.keep_raw_prompt and isinstance(raw.get("prompt"), list):

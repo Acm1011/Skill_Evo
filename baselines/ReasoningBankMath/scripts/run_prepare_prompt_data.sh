@@ -161,5 +161,5 @@ run_one() {
     --keep-raw-prompt
 }
 
-run_one "${TEMP_INPUT}" "temp_data_memory_prompt"
-run_one "${GREEDY_INPUT}" "greedy_data_memory_prompt"
+run_one "${TEMP_INPUT}" "temp_data"
+run_one "${GREEDY_INPUT}" "greedy_data"
