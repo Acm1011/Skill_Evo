@@ -286,9 +286,14 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 log_only_rank_0=True,
             )
 
-            # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
-            # loaded from the Hub.
-            if hasattr(model_config, "auto_map"):
+            # Only copy custom modeling files for actual remote-code models.
+            # Built-in transformers models such as Phi-3 can expose `auto_map`, but their code already ships with
+            # transformers and `custom_object_save` may fail while traversing package-relative imports.
+            model_module = getattr(getattr(unwrap_model, "__class__", None), "__module__", "") or ""
+            should_save_custom_object = hasattr(model_config, "auto_map") and not model_module.startswith(
+                "transformers.models."
+            )
+            if should_save_custom_object:
                 custom_object_save(unwrap_model, hf_config_tokenizer_path, config=model_config)
 
             # Also save runtime FSDP config
