@@ -51,13 +51,30 @@ class ExpelMathTests(unittest.TestCase):
         rows = [
             {"idx": 1, "problem": "p1", "topic": "Math->Algebra", "topic_key": "Math_Algebra", "student_response": "ok", "is_correct": True, "ground_truth": "1"},
             {"idx": 2, "problem": "p1", "topic": "Math->Algebra", "topic_key": "Math_Algebra", "student_response": "bad", "is_correct": False, "ground_truth": "1"},
-            {"idx": 3, "problem": "p2", "topic": "Math->Algebra", "topic_key": "Math_Algebra", "student_response": "ok", "is_correct": True, "ground_truth": "2"},
-            {"idx": 4, "problem": "p3", "topic": "Math->Geometry", "topic_key": "Math_Geometry", "student_response": "bad1", "is_correct": False, "ground_truth": "3"},
-            {"idx": 5, "problem": "p3", "topic": "Math->Geometry", "topic_key": "Math_Geometry", "student_response": "bad2", "is_correct": None, "ground_truth": "3"},
+            {"idx": 3, "problem": "p1", "topic": "Math->Algebra", "topic_key": "Math_Algebra", "student_response": "bad2", "is_correct": False, "ground_truth": "1"},
+            {"idx": 4, "problem": "p2", "topic": "Math->Algebra", "topic_key": "Math_Algebra", "student_response": "ok1", "is_correct": True, "ground_truth": "2"},
+            {"idx": 5, "problem": "p2", "topic": "Math->Algebra", "topic_key": "Math_Algebra", "student_response": "ok2", "is_correct": True, "ground_truth": "2"},
+            {"idx": 6, "problem": "p2", "topic": "Math->Algebra", "topic_key": "Math_Algebra", "student_response": "ok3", "is_correct": True, "ground_truth": "2"},
+            {"idx": 7, "problem": "p3", "topic": "Math->Geometry", "topic_key": "Math_Geometry", "student_response": "bad1", "is_correct": False, "ground_truth": "3"},
+            {"idx": 8, "problem": "p3", "topic": "Math->Geometry", "topic_key": "Math_Geometry", "student_response": "bad2", "is_correct": None, "ground_truth": "3"},
         ]
         groups = group_trajectories(rows, group_by="problem", max_success_group=4, max_failure_group=4)
         kinds = sorted(g["memory_type"] for g in groups)
-        self.assertEqual(kinds, ["compare_rule", "failure_rule", "success_rule"])
+        self.assertEqual(kinds, ["compare_rule", "failure_rule", "failure_rule", "success_rule"])
+
+        compare_group = next(g for g in groups if g["memory_type"] == "compare_rule")
+        self.assertEqual(len(compare_group["rows"]), 2)
+        self.assertEqual(sum(1 for r in compare_group["rows"] if r["is_correct"] is True), 1)
+        self.assertEqual(sum(1 for r in compare_group["rows"] if r["is_correct"] is not True), 1)
+
+        success_group = next(g for g in groups if g["memory_type"] == "success_rule")
+        self.assertEqual(len(success_group["rows"]), 2)
+        self.assertTrue(all(r["is_correct"] is True for r in success_group["rows"]))
+
+        failure_groups = [g for g in groups if g["memory_type"] == "failure_rule"]
+        self.assertEqual(len(failure_groups), 2)
+        self.assertTrue(all(len(g["rows"]) == 2 for g in failure_groups))
+        self.assertTrue(all(all(r["is_correct"] is not True for r in g["rows"]) for g in failure_groups))
 
     def test_dedupe_respects_memory_type(self) -> None:
         existing = [
@@ -189,6 +206,18 @@ class ExpelMathTests(unittest.TestCase):
                             },
                             ensure_ascii=False,
                         ),
+                        json.dumps(
+                            {
+                                "idx": 4,
+                                "problem": "Solve x + 7 = 10",
+                                "topic": "Math->Algebra",
+                                "topic_key": "Math_Algebra",
+                                "student_response": "Use inverse operations: x = 10 - 7 = 3.",
+                                "is_correct": True,
+                                "ground_truth": "3",
+                            },
+                            ensure_ascii=False,
+                        ),
                     ]
                 )
                 + "\n",
@@ -306,17 +335,33 @@ class ExpelMathTests(unittest.TestCase):
             self.assertTrue(eval_rows[0]["is_correct"])
 
             traj2.write_text(
-                json.dumps(
-                    {
-                        "idx": 4,
-                        "problem": "Solve x + 20 = 23",
-                        "topic": "Math->Algebra",
-                        "topic_key": "Math_Algebra",
-                        "student_response": "Subtract 20 from both sides, x=3.",
-                        "is_correct": True,
-                        "ground_truth": "3",
-                    },
-                    ensure_ascii=False,
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "idx": 5,
+                                "problem": "Solve x + 20 = 23",
+                                "topic": "Math->Algebra",
+                                "topic_key": "Math_Algebra",
+                                "student_response": "Subtract 20 from both sides, x=3.",
+                                "is_correct": True,
+                                "ground_truth": "3",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "idx": 6,
+                                "problem": "Solve x + 20 = 23",
+                                "topic": "Math->Algebra",
+                                "topic_key": "Math_Algebra",
+                                "student_response": "Apply the inverse operation and get x = 23 - 20 = 3.",
+                                "is_correct": True,
+                                "ground_truth": "3",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
                 )
                 + "\n",
                 encoding="utf-8",

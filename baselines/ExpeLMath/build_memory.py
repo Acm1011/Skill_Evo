@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List
 
 from baselines.ReasoningBankMath.io_utils import write_jsonl
 
@@ -32,14 +32,19 @@ def group_trajectories(
         key = str(row.get(group_by) or row.get("problem") or row.get("idx"))
         grouped[key].append(row)
 
+    success_take = max(1, min(2, max_success_group))
+    failure_take = max(1, min(2, max_failure_group))
+
     compare_groups: List[Dict[str, Any]] = []
     failure_groups: List[Dict[str, Any]] = []
-    success_candidates: List[Tuple[str, Dict[str, Any]]] = []
+    success_groups: List[Dict[str, Any]] = []
     for group_rows in grouped.values():
         success_rows = [r for r in group_rows if r.get("is_correct") is True]
         failure_rows = [r for r in group_rows if r.get("is_correct") is not True]
         representative = group_rows[0]
         if success_rows and failure_rows:
+            picked_success = success_rows[:success_take]
+            picked_failure = failure_rows[:failure_take]
             compare_groups.append(
                 {
                     "problem": representative.get("problem"),
@@ -47,14 +52,38 @@ def group_trajectories(
                     "topic_key": representative.get("topic_key"),
                     "status": "mixed",
                     "memory_type": "compare_rule",
-                    "rows": success_rows[:max_success_group] + failure_rows[:max_failure_group],
-                    "success_rows": success_rows[:max_success_group],
-                    "failure_rows": failure_rows[:max_failure_group],
+                    "rows": picked_success[:1] + picked_failure[:1],
+                    "success_rows": picked_success[:1],
+                    "failure_rows": picked_failure[:1],
                 }
             )
-        elif success_rows:
-            success_candidates.append((str(representative.get("topic_key") or "unknown"), success_rows[0]))
+            if len(failure_rows) >= 2:
+                failure_groups.append(
+                    {
+                        "problem": representative.get("problem"),
+                        "topic": representative.get("topic"),
+                        "topic_key": representative.get("topic_key"),
+                        "status": "failure",
+                        "memory_type": "failure_rule",
+                        "rows": picked_failure,
+                        "failure_rows": picked_failure,
+                    }
+                )
+        elif len(success_rows) >= 2:
+            picked_success = success_rows[:success_take]
+            success_groups.append(
+                {
+                    "problem": representative.get("problem"),
+                    "topic": representative.get("topic"),
+                    "topic_key": representative.get("topic_key"),
+                    "status": "success",
+                    "memory_type": "success_rule",
+                    "rows": picked_success,
+                    "success_rows": picked_success,
+                }
+            )
         elif len(failure_rows) >= 2:
+            picked_failure = failure_rows[:failure_take]
             failure_groups.append(
                 {
                     "problem": representative.get("problem"),
@@ -62,46 +91,10 @@ def group_trajectories(
                     "topic_key": representative.get("topic_key"),
                     "status": "failure",
                     "memory_type": "failure_rule",
-                    "rows": failure_rows[:max_failure_group],
-                    "failure_rows": failure_rows[:max_failure_group],
+                    "rows": picked_failure,
+                    "failure_rows": picked_failure,
                 }
             )
-
-    success_groups: List[Dict[str, Any]] = []
-    bucket: List[Dict[str, Any]] = []
-    bucket_topic = "unknown"
-    for topic_key, row in success_candidates:
-        if not bucket:
-            bucket_topic = topic_key
-        if len(bucket) >= max_success_group:
-            representative = bucket[0]
-            success_groups.append(
-                {
-                    "problem": representative.get("problem"),
-                    "topic": representative.get("topic"),
-                    "topic_key": bucket_topic,
-                    "status": "success",
-                    "memory_type": "success_rule",
-                    "rows": list(bucket),
-                    "success_rows": list(bucket),
-                }
-            )
-            bucket = []
-            bucket_topic = topic_key
-        bucket.append(row)
-    if bucket:
-        representative = bucket[0]
-        success_groups.append(
-            {
-                "problem": representative.get("problem"),
-                "topic": representative.get("topic"),
-                "topic_key": bucket_topic,
-                "status": "success",
-                "memory_type": "success_rule",
-                "rows": list(bucket),
-                "success_rows": list(bucket),
-            }
-        )
     return compare_groups + success_groups + failure_groups
 
 
@@ -251,4 +244,3 @@ def build_build_memory_parser(sub: Any) -> None:
     p.add_argument("--max-tokens", type=int, default=2048)
     p.add_argument("--fail-on-error", action="store_true")
     p.set_defaults(_run=run_build_memory)
-

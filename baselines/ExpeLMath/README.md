@@ -47,5 +47,13 @@ python -m baselines.ExpeLMath evolve-memory --memory-bank memory_bank.jsonl --tr
 ## Memory Types
 
 - `compare_rule`: 同题成功/失败对比得到的规则
-- `success_rule`: 跨题成功轨迹归纳出的正向规则
+- `success_rule`: 成功轨迹归纳出的正向规则
 - `failure_rule`: 多条失败轨迹归纳出的避免性规则
+
+## Grouping Strategy
+
+- 按题分组后，每类 memory 最多只取两条轨迹
+- mixed 题：取 1 条成功 + 1 条失败生成 `compare_rule`
+- mixed 且失败数至少 2：额外取 2 条失败生成 `failure_rule`
+- 纯成功题：取 2 条成功生成 `success_rule`
+- 纯失败题：取 2 条失败生成 `failure_rule`
