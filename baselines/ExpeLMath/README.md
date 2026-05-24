@@ -71,7 +71,8 @@ python -m baselines.ExpeLMath evolve-memory \
 - `build-embeddings`：
   - `--backend hash`：不需要任何模型服务。
   - `--backend openai`：需要 `--embed-base-url` 和 `--embed-model`。
-- `retrieve`：默认只读已有 embedding 文件并做本地相似度排序，不需要外部 retriever server。
+- `retrieve` 子命令：默认只读已有 embedding 文件并做本地相似度排序，不需要外部 retriever server。
+- `scripts/retrieve.sh`：会启动外部 retriever server，把 memory 同步到 `/docs/replace`，然后为 `data/greedy_data.jsonl` 和 `data/temp_data.jsonl` 生成注入 skills 的新数据。
 
 ## evolve-memory 是做什么
 
@@ -92,7 +93,7 @@ python -m baselines.ExpeLMath evolve-memory \
 - `run_gen_traj.sh`：自动启动 `skill_src/Zero/start_rollout_servers.sh`，然后生成轨迹
 - `run_build_memory_with_rollout.sh`：自动启动 rollout server，然后用 rollout backend 建 memory
 - `build_embeddings.sh`：直接包装 `python -m baselines.ExpeLMath build-embeddings`
-- `retrieve.sh`：直接包装 `python -m baselines.ExpeLMath retrieve`
+- `retrieve.sh`：启动 `skill_src/Zero/start_retriever_server.sh`，为 `greedy_data.jsonl` / `temp_data.jsonl` 检索 top-k memories，并输出 `*_skills.jsonl` + `*_skills.parquet`
 - `run_eval_with_rollout.sh`：自动启动 rollout server，然后执行带 memory 的评测
 - `run_evolve_memory_with_rollout.sh`：自动启动 rollout server，然后做增量 memory 演化
 
@@ -117,10 +118,7 @@ bash baselines/ExpeLMath/scripts/build_embeddings.sh \
 
 bash baselines/ExpeLMath/scripts/retrieve.sh \
   --memory-bank baselines/ExpeLMath/outputs/memory_bank.jsonl \
-  --embeddings baselines/ExpeLMath/outputs/memory_embeddings.jsonl \
-  --question "Solve x + 2 = 5" \
-  --topic "Math->Algebra" \
-  --top-k 3
+  --top-k 5
 
 bash baselines/ExpeLMath/scripts/run_eval_with_rollout.sh \
   --deepmath-jsonl /home/ycy/sdi/data/DeepMath-103K.jsonl \
@@ -141,11 +139,10 @@ bash baselines/ExpeLMath/scripts/run_evolve_memory_with_rollout.sh \
 
 ## 关于 `start_retriever_server.sh`
 
-当前 ExpeLMath 的 `retrieve` 走的是本地 `embedding_rows + cosine similarity` 检索，不会调用 `skill_src/Zero/start_retriever_server.sh`。也就是说：
+需要区分两个入口：
 
-- 你现在跑 ExpeLMath，不需要启动 retriever server
-- 只需要在 rollout 相关步骤启动 `skill_src/Zero/start_rollout_servers.sh`
-- 如果后面你想把 ExpeLMath 改成走外部 retriever HTTP 排序，那时再接 `start_retriever_server.sh` 才有意义
+- `python -m baselines.ExpeLMath retrieve` 走的是本地 `embedding_rows + cosine similarity` 检索，不会调用 `skill_src/Zero/start_retriever_server.sh`
+- `bash baselines/ExpeLMath/scripts/retrieve.sh` 会调用 `skill_src/Zero/start_retriever_server.sh`，并把 memory 同步到 retriever 后再批量改写 `greedy/temp` 数据
 
 ## Data Contract
 

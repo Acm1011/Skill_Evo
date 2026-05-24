@@ -13,6 +13,7 @@ from baselines.ExpeLMath.eval_with_memory import run_eval
 from baselines.ExpeLMath.evolve_memory import run_evolve_memory
 from baselines.ExpeLMath.memory_bank import dedupe_records
 from baselines.ExpeLMath.memory_parser import parse_teacher_output
+from baselines.ExpeLMath.prepare_prompt_data import run_prepare_prompt_data
 from baselines.ExpeLMath.retrieve_memory import retrieve_records
 from baselines.ReasoningBankMath.io_utils import read_jsonl
 
@@ -155,6 +156,73 @@ class ExpelMathTests(unittest.TestCase):
                 topic_bonus=0.05,
             )
         self.assertEqual(scored[0][0]["memory_id"], "m1")
+
+    def test_prepare_prompt_data_only_changes_prompt_content(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            memory_bank = tmp / "memory_bank.jsonl"
+            input_jsonl = tmp / "input.jsonl"
+            out_jsonl = tmp / "greedy_data_skills.jsonl"
+            out_parquet = tmp / "greedy_data_skills.parquet"
+
+            memory_bank.write_text(
+                json.dumps(
+                    {
+                        "memory_id": "m1",
+                        "topic": "Math->Algebra",
+                        "topic_key": "Math_Algebra",
+                        "status": "success",
+                        "memory_type": "success_rule",
+                        "raw_rule": "Use inverse operations consistently.",
+                        "embedding_text": "Question: Solve x + 2 = 5\nTopic: Math->Algebra\nRaw Rule: Use inverse operations consistently.",
+                        "memory_items": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            original_row = {
+                "ability": "math",
+                "data_source": "AMC23",
+                "problem": "Solve x + 2 = 5",
+                "prompt": [{"role": "user", "content": "Original prompt"}],
+                "reward_model": {"ground_truth": "3", "style": "rule"},
+                "extra_info": {"idx": 7, "problem": "Solve x + 2 = 5", "solution": "3", "split": "test"},
+            }
+            input_jsonl.write_text(json.dumps(original_row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with mock.patch(
+                "baselines.ExpeLMath.prepare_prompt_data._post_rank",
+                return_value=[0],
+            ):
+                args = argparse.Namespace(
+                    input_jsonl=str(input_jsonl),
+                    memory_bank=str(memory_bank),
+                    retriever_url="http://127.0.0.1:8766",
+                    start=0,
+                    end=None,
+                    top_k=5,
+                    mode="embedding",
+                    retrieve_lambda=0.5,
+                    output_jsonl=str(out_jsonl),
+                    output_parquet=str(out_parquet),
+                    fail_on_retrieve_error=True,
+                )
+                self.assertEqual(run_prepare_prompt_data(args), 0)
+
+            rows = read_jsonl(out_jsonl)
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["ability"], original_row["ability"])
+            self.assertEqual(row["data_source"], original_row["data_source"])
+            self.assertEqual(row["reward_model"], original_row["reward_model"])
+            self.assertEqual(row["extra_info"], original_row["extra_info"])
+            self.assertEqual(row["problem"], original_row["problem"])
+            self.assertEqual(row["prompt"][0]["role"], "user")
+            self.assertNotEqual(row["prompt"][0]["content"], original_row["prompt"][0]["content"])
+            self.assertIn("SKILL:", row["prompt"][0]["content"])
+            self.assertIn("Question: Solve x + 2 = 5", row["prompt"][0]["content"])
 
     def test_end_to_end_build_retrieve_eval_evolve(self) -> None:
         with tempfile.TemporaryDirectory() as td:
