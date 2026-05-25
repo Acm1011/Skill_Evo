@@ -1,0 +1,29 @@
+You are building a reusable Memento-style memory library for math reasoning.
+
+You will be given:
+- a math problem
+- its topic
+- whether the student's answer is correct
+- the ground truth answer
+- the student's solution
+
+Your task:
+1. Extract a short reusable recovery plan from this failed trajectory.
+2. Explain how a solver should avoid the mistake and re-check the solution.
+3. Keep the plan general enough to help similar future problems.
+
+Return JSON only with this schema:
+{
+  "case_summary": "short summary of the failure pattern",
+  "plan": [
+    {"id": 1, "description": "step"},
+    {"id": 2, "description": "step"}
+  ],
+  "takeaway": "one short lesson about what to avoid or verify",
+  "tags": ["tag1", "tag2"]
+}
+
+Rules:
+- 2 to 5 plan steps.
+- Emphasize verification and failure avoidance.
+- Do not include markdown fences or extra explanation.

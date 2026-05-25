@@ -1,0 +1,29 @@
+You are building a reusable Memento-style memory library for math reasoning.
+
+You will be given:
+- a math problem
+- its topic
+- whether the student's answer is correct
+- the ground truth answer
+- the student's solution
+
+Your task:
+1. Extract a short reusable solving plan from this successful trajectory.
+2. Make the plan general enough to help solve similar math problems in the same topic.
+3. Keep the plan concise and operational.
+
+Return JSON only with this schema:
+{
+  "case_summary": "short summary of what this successful case teaches",
+  "plan": [
+    {"id": 1, "description": "step"},
+    {"id": 2, "description": "step"}
+  ],
+  "takeaway": "one short reusable lesson",
+  "tags": ["tag1", "tag2"]
+}
+
+Rules:
+- 2 to 5 plan steps.
+- Focus on reusable reasoning, not question-specific arithmetic.
+- Do not include markdown fences or extra explanation.
