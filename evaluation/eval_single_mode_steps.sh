@@ -43,6 +43,8 @@ TEMPERATURE="${TEMPERATURE:-0.7}"
 SAMPLE_RATIO="${SAMPLE_RATIO:-0.1}"
 SKIP_BASE_MODEL="${SKIP_BASE_MODEL:-false}"
 RUN_GENERAL_EVAL="${RUN_GENERAL_EVAL:-false}"
+GENERAL_DATA_MODE="${GENERAL_DATA_MODE:-raw}"
+GENERAL_SKILL_DATA_DIR="${GENERAL_SKILL_DATA_DIR:-}"
 TEMP_DATA_FILE="${TEMP_DATA_FILE:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/temp_data_skill.parquet}"
 GREEDY_DATA_FILE="${GREEDY_DATA_FILE:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/greedy_data_skill.parquet}"
 
@@ -80,6 +82,14 @@ while [[ $# -gt 0 ]]; do
             RUN_GENERAL_EVAL="true"
             shift
             ;;
+        --general_data_mode)
+            GENERAL_DATA_MODE="$2"
+            shift 2
+            ;;
+        --general_skill_data_dir)
+            GENERAL_SKILL_DATA_DIR="$2"
+            shift 2
+            ;;
         --temp_data_file)
             TEMP_DATA_FILE="$2"
             shift 2
@@ -109,6 +119,14 @@ if [ ! -f "$TEMP_DATA_FILE" ]; then
 fi
 if [ ! -f "$GREEDY_DATA_FILE" ]; then
     echo "Error: greedy_data_file 不存在: $GREEDY_DATA_FILE"
+    exit 1
+fi
+if [ "$GENERAL_DATA_MODE" != "raw" ] && [ "$GENERAL_DATA_MODE" != "skill" ]; then
+    echo "Error: GENERAL_DATA_MODE 只能是 raw 或 skill，当前: $GENERAL_DATA_MODE"
+    exit 1
+fi
+if [ "$RUN_GENERAL_EVAL" = "true" ] && [ "$GENERAL_DATA_MODE" = "skill" ] && [ ! -d "$GENERAL_SKILL_DATA_DIR" ]; then
+    echo "Error: general skill data dir 不存在: $GENERAL_SKILL_DATA_DIR"
     exit 1
 fi
 
@@ -275,6 +293,8 @@ echo "  评测 Steps:    $STEPS"
 echo "  基础模型:      $BASB_MODEL_NAME"
 echo "  跳过基础模型:  $SKIP_BASE_MODEL"
 echo "  跑通用评测:    $RUN_GENERAL_EVAL"
+echo "  通用数据模式:  $GENERAL_DATA_MODE"
+echo "  通用技能数据:  ${GENERAL_SKILL_DATA_DIR:-<none>}"
 echo "  温度:          $TEMPERATURE"
 echo "  采样比例:      $SAMPLE_RATIO"
 echo "  temp_data 文件: $TEMP_DATA_FILE"
@@ -501,6 +521,7 @@ start_additional_eval_job() {
     local model_path="$2"
     local model_name="$3"
     local eval_script="$4"
+    local general_eval_data_dir="${data_dir}"
     
     # 从 model_name 提取 step（格式：xxx-stepN）
     local step=$(echo "$model_name" | sed -n 's/.*-step\([0-9]*\)$/\1/p')
@@ -515,12 +536,16 @@ start_additional_eval_job() {
     fi
     
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting evaluation [${eval_script}] for model [${model_name}] (step=${step:-base}) on GPU [${gpu_id}]"
+
+    if [ "$GENERAL_DATA_MODE" = "skill" ]; then
+        general_eval_data_dir="${GENERAL_SKILL_DATA_DIR}"
+    fi
     
     CUDA_VISIBLE_DEVICES="${gpu_id}" python "${eval_script}" \
         --model_path "${model_path}" \
         --model_name "${model_name}" \
         --save_path_dir "${target_save_dir}" \
-        --data_path_dir "${data_dir}" \
+        --data_path_dir "${general_eval_data_dir}" \
         --sample_ratio "${SAMPLE_RATIO}" \
         ${step_arg} &
     local pid=$!
