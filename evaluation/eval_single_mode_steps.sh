@@ -42,6 +42,7 @@ BASB_MODEL_NAME="${SB_MODEL_NAME:-Qwen3-4B-Instruct-2507}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 SAMPLE_RATIO="${SAMPLE_RATIO:-0.1}"
 SKIP_BASE_MODEL="${SKIP_BASE_MODEL:-false}"
+RUN_GENERAL_EVAL="${RUN_GENERAL_EVAL:-false}"
 TEMP_DATA_FILE="${TEMP_DATA_FILE:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/temp_data_skill.parquet}"
 GREEDY_DATA_FILE="${GREEDY_DATA_FILE:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/greedy_data_skill.parquet}"
 
@@ -73,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip_base_model)
             SKIP_BASE_MODEL="true"
+            shift
+            ;;
+        --run_general)
+            RUN_GENERAL_EVAL="true"
             shift
             ;;
         --temp_data_file)
@@ -269,6 +274,7 @@ echo "  Checkpoint 目录: $CKPTS_DIR"
 echo "  评测 Steps:    $STEPS"
 echo "  基础模型:      $BASB_MODEL_NAME"
 echo "  跳过基础模型:  $SKIP_BASE_MODEL"
+echo "  跑通用评测:    $RUN_GENERAL_EVAL"
 echo "  温度:          $TEMPERATURE"
 echo "  采样比例:      $SAMPLE_RATIO"
 echo "  temp_data 文件: $TEMP_DATA_FILE"
@@ -287,11 +293,11 @@ TASKS=(
     "greedy_data"
 )
 
-# ADDITIONAL_EVAL_DATASETS=(
-#     "eval_bbeh_step.py"
-#     "eval_mmlupro_step.py"
-#     "eval_supergpqa_step.py"
-# )
+ADDITIONAL_EVAL_DATASETS=(
+    "eval_bbeh_step.py"
+    "eval_mmlupro_step.py"
+    "eval_supergpqa_step.py"
+)
 
 # =============================================================================
 # GPU 初始化
@@ -754,96 +760,96 @@ check_completed_jobs() {
 }
 
 # =============================================================================
-# 主执行循环 - 额外评测数据集（已禁用，仅保留数学评测）
+# 主执行循环 - 额外评测数据集
 # =============================================================================
 
-# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting additional evaluation datasets"
-#
-# declare -a task_queue=()
-#
-# for i in "${!model_list[@]}"; do
-#     model_name="${model_list[$i]}"
-#     model_path="${model_paths[$i]}"
-#
-#     if [ ! -d "$model_path" ]; then
-#         echo "Warning: Model path does not exist: $model_path, skipping..."
-#         continue
-#     fi
-#
-#     for eval_script in "${ADDITIONAL_EVAL_DATASETS[@]}"; do
-#         if check_dataset_completed "$model_name" "$eval_script"; then
-#             continue
-#         fi
-#         task_queue+=("${model_name}|${model_path}|${eval_script}")
-#     done
-# done
-#
-# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Additional eval task queue: ${#task_queue[@]} tasks"
-# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Task queue details:"
-# for i in "${!task_queue[@]}"; do
-#     echo "  [$i] ${task_queue[$i]}"
-# done
-#
-# # 如果没有任务，跳过此循环
-# if [ ${#task_queue[@]} -eq 0 ]; then
-#     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] No additional eval tasks to run"
-# else
-#
-# cleanup_counter=0
-# task_index=0
-#
-# while [ $task_index -lt ${#task_queue[@]} ] || [ ${#pids[@]} -gt 0 ]; do
-#     # 定期综合清理
-#     cleanup_counter=$((cleanup_counter + 1))
-#     if [ $((cleanup_counter % 10)) -eq 0 ]; then
-#         comprehensive_cleanup
-#     else
-#         cleanup_zombie_processes
-#     fi
-#
-#     check_completed_jobs
-#     available_gpus=($(get_available_gpus))
-#
-#     while [ $task_index -lt ${#task_queue[@]} ] && [ ${#available_gpus[@]} -ge 1 ]; do
-#         task="${task_queue[$task_index]}"
-#         IFS='|' read -r model_name model_path eval_script <<< "$task"
-#
-#         if check_dataset_completed "$model_name" "$eval_script"; then
-#             echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] already completed"
-#             task_index=$((task_index + 1))
-#             continue
-#         fi
-#
-#         if [[ "${available_gpus[0]}" =~ ^[0-9]+$ ]]; then
-#             if start_additional_eval_job "${available_gpus[0]}" "$model_path" "$model_name" "$eval_script"; then
-#                 echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [START] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] on GPU ${available_gpus[0]}"
-#                 task_index=$((task_index + 1))
-#                 available_gpus=($(get_available_gpus))
-#             else
-#                 echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [RETRY] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] failed to start, will retry"
-#                 break
-#             fi
-#         else
-#             echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Invalid GPU ID, skipping task $((task_index + 1))/${#task_queue[@]}"
-#             task_index=$((task_index + 1))
-#         fi
-#     done
-#
-#     if [ ${#pids[@]} -gt 0 ] || [ $task_index -lt ${#task_queue[@]} ]; then
-#         completed=$((task_index - ${#pids[@]}))
-#         total_tasks=${#task_queue[@]}
-#         progress=0
-#         if [ $total_tasks -gt 0 ]; then
-#             progress=$((completed * 100 / total_tasks))
-#         fi
-#         echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [STATUS] Additional eval: Running ${#pids[@]} jobs, Completed ${completed}/${total_tasks} (${progress}%), Pending $((total_tasks - task_index))"
-#         sleep 30
-#     fi
-# done
-#
-# fi  # 结束 task_queue 非空检查
-#
-# echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All additional evaluations completed! (${#task_queue[@]} tasks)"
+if [ "$RUN_GENERAL_EVAL" = "true" ]; then
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting additional evaluation datasets"
+
+    declare -a task_queue=()
+
+    for i in "${!model_list[@]}"; do
+        model_name="${model_list[$i]}"
+        model_path="${model_paths[$i]}"
+
+        if [ ! -d "$model_path" ]; then
+            echo "Warning: Model path does not exist: $model_path, skipping..."
+            continue
+        fi
+
+        for eval_script in "${ADDITIONAL_EVAL_DATASETS[@]}"; do
+            if check_dataset_completed "$model_name" "$eval_script"; then
+                continue
+            fi
+            task_queue+=("${model_name}|${model_path}|${eval_script}")
+        done
+    done
+
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Additional eval task queue: ${#task_queue[@]} tasks"
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Task queue details:"
+    for i in "${!task_queue[@]}"; do
+        echo "  [$i] ${task_queue[$i]}"
+    done
+
+    if [ ${#task_queue[@]} -eq 0 ]; then
+        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] No additional eval tasks to run"
+    else
+        cleanup_counter=0
+        task_index=0
+
+        while [ $task_index -lt ${#task_queue[@]} ] || [ ${#pids[@]} -gt 0 ]; do
+            cleanup_counter=$((cleanup_counter + 1))
+            if [ $((cleanup_counter % 10)) -eq 0 ]; then
+                comprehensive_cleanup
+            else
+                cleanup_zombie_processes
+            fi
+
+            check_completed_jobs
+            available_gpus=($(get_available_gpus))
+
+            while [ $task_index -lt ${#task_queue[@]} ] && [ ${#available_gpus[@]} -ge 1 ]; do
+                task="${task_queue[$task_index]}"
+                IFS='|' read -r model_name model_path eval_script <<< "$task"
+
+                if check_dataset_completed "$model_name" "$eval_script"; then
+                    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] already completed"
+                    task_index=$((task_index + 1))
+                    continue
+                fi
+
+                if [[ "${available_gpus[0]}" =~ ^[0-9]+$ ]]; then
+                    if start_additional_eval_job "${available_gpus[0]}" "$model_path" "$model_name" "$eval_script"; then
+                        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [START] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] on GPU ${available_gpus[0]}"
+                        task_index=$((task_index + 1))
+                        available_gpus=($(get_available_gpus))
+                    else
+                        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [RETRY] Task $((task_index + 1))/${#task_queue[@]}: [${eval_script}] for [${model_name}] failed to start, will retry"
+                        break
+                    fi
+                else
+                    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Invalid GPU ID, skipping task $((task_index + 1))/${#task_queue[@]}"
+                    task_index=$((task_index + 1))
+                fi
+            done
+
+            if [ ${#pids[@]} -gt 0 ] || [ $task_index -lt ${#task_queue[@]} ]; then
+                completed=$((task_index - ${#pids[@]}))
+                total_tasks=${#task_queue[@]}
+                progress=0
+                if [ $total_tasks -gt 0 ]; then
+                    progress=$((completed * 100 / total_tasks))
+                fi
+                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [STATUS] Additional eval: Running ${#pids[@]} jobs, Completed ${completed}/${total_tasks} (${progress}%), Pending $((total_tasks - task_index))"
+                sleep 30
+            fi
+        done
+    fi
+
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All additional evaluations completed! (${#task_queue[@]} tasks)"
+else
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] General evaluation disabled (use --run_general to enable)"
+fi
 
 # =============================================================================
 # 重置状态

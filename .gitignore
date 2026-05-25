@@ -146,3 +146,6 @@ saved_results/
 
 embedding_cache/*.zip
 *.zip
+
+# Evaluation benchmark JSONL outputs are too large for GitHub; keep them local.
+/evaluation/.eval_custom_data/general_benchmarks/*.jsonl
