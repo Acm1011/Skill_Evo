@@ -48,8 +48,8 @@ def read_aggregated_eval(eval_path):
             data = json.load(f)
             datasets = data.get('datasets', {})
             
-            # 提取三个数据集的结果
-            for dataset_name in ['bbeh', 'mmlupro', 'supergpqa']:
+            # 提取通用评测数据集的结果
+            for dataset_name in ['bbeh', 'mmlupro', 'supergpqa', 'gpqa']:
                 if dataset_name in datasets:
                     dataset_result = datasets[dataset_name]
                     accuracy = dataset_result.get('accuracy')
@@ -141,11 +141,11 @@ def tb(prefix, step, temperature, eval_results_dir=None, tb_path_dir=None, base_
         eval_data.update(d2)
         eval_data.update({"Math_AVG": round(math_avg, 2)})
         
-        # 添加三个新数据集的评测结果
+        # 添加通用数据集的评测结果
         additional_eval_data, general_avg_data = read_aggregated_eval(eval_path)
         eval_data.update(additional_eval_data)
         
-        # 计算 General AVG（三个新数据集的平均值）
+        # 计算 General AVG（通用数据集的平均值）
         general_avg = sum(general_avg_data) / len(general_avg_data) if len(general_avg_data) > 0 else 0.0
         eval_data.update({"General_AVG": round(general_avg, 2)})
         

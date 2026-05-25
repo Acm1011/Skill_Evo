@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-聚合三个评测数据集的结果到一个 json 文件
+聚合通用评测数据集的结果到一个 json 文件
 """
 import json
 import os
@@ -19,7 +19,7 @@ def load_result_file(file_path):
 
 def aggregate_eval_results(save_path_dir, model_name, output_file=None):
     """
-    聚合三个评测数据集的结果
+    聚合通用评测数据集的结果
     
     Args:
         save_path_dir: 保存结果的基础目录
@@ -32,11 +32,12 @@ def aggregate_eval_results(save_path_dir, model_name, output_file=None):
         print(f"Warning: Model directory does not exist: {model_dir}")
         return
     
-    # 定义三个评测数据集的结果文件路径
+    # 定义通用评测数据集的结果文件路径
     result_files = {
         'bbeh': os.path.join(model_dir, 'bbeh_final_results.json'),
         'mmlupro': os.path.join(model_dir, 'mmlupro_final_results.json'),
-        'supergpqa': os.path.join(model_dir, 'supergpqa_final_results.json')
+        'supergpqa': os.path.join(model_dir, 'supergpqa_final_results.json'),
+        'gpqa': os.path.join(model_dir, 'gpqa_final_results.json')
     }
     
     # 加载所有结果
@@ -57,8 +58,9 @@ def aggregate_eval_results(save_path_dir, model_name, output_file=None):
     aggregated_result = {
         'model_name': model_name,
         'model_path': results.get('bbeh', {}).get('model_path') or 
-                      results.get('mmlupro', {}).get('model_path') or 
-                      results.get('supergpqa', {}).get('model_path'),
+                      results.get('mmlupro', {}).get('model_path') or
+                      results.get('supergpqa', {}).get('model_path') or
+                      results.get('gpqa', {}).get('model_path'),
         'datasets': {}
     }
     
@@ -118,11 +120,12 @@ def aggregate_all_models(save_path_dir, model_list, output_file=None):
             print(f"Warning: Model directory does not exist: {model_dir}")
             continue
         
-        # 定义三个评测数据集的结果文件路径
+        # 定义通用评测数据集的结果文件路径
         result_files = {
             'bbeh': os.path.join(model_dir, 'bbeh_final_results.json'),
             'mmlupro': os.path.join(model_dir, 'mmlupro_final_results.json'),
-            'supergpqa': os.path.join(model_dir, 'supergpqa_final_results.json')
+            'supergpqa': os.path.join(model_dir, 'supergpqa_final_results.json'),
+            'gpqa': os.path.join(model_dir, 'gpqa_final_results.json')
         }
         
         # 加载所有结果
@@ -140,8 +143,9 @@ def aggregate_all_models(save_path_dir, model_list, output_file=None):
         aggregated_result = {
             'model_name': model_name,
             'model_path': results.get('bbeh', {}).get('model_path') or 
-                          results.get('mmlupro', {}).get('model_path') or 
-                          results.get('supergpqa', {}).get('model_path'),
+                          results.get('mmlupro', {}).get('model_path') or
+                          results.get('supergpqa', {}).get('model_path') or
+                          results.get('gpqa', {}).get('model_path'),
             'datasets': {}
         }
         
@@ -186,7 +190,7 @@ def aggregate_all_models(save_path_dir, model_list, output_file=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Aggregate evaluation results from three datasets')
+    parser = argparse.ArgumentParser(description='Aggregate evaluation results from general datasets')
     parser.add_argument("--save_path_dir", type=str, required=True, help="Directory to save results")
     parser.add_argument("--model_name", type=str, default=None, help="Name of the model (optional, if not provided, will aggregate all models)")
     parser.add_argument("--model_list", type=str, nargs='+', default=None, help="List of model names (optional)")
@@ -202,4 +206,3 @@ if __name__ == "__main__":
     else:
         print("Error: Either --model_name or --model_list must be provided")
         parser.print_help()
-

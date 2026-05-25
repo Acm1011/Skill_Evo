@@ -82,7 +82,7 @@ def read_aggregated_eval(eval_path):
             if datasets is None:
                 datasets = data.get('additional_datasets', {})
             
-            for dataset_name in ['bbeh', 'mmlupro', 'supergpqa']:
+            for dataset_name in ['bbeh', 'mmlupro', 'supergpqa', 'gpqa']:
                 if dataset_name in datasets:
                     dataset_result = datasets[dataset_name]
                     accuracy = dataset_result.get('accuracy')
@@ -149,7 +149,7 @@ def tb_step(exp_name, temperature, save_path_dir, base_model_dir=None, tb_path_d
         eval_data.update(d2)
         eval_data['Math_AVG'] = round(math_avg, 2)
         
-        # 读取三个新数据集的评测结果
+        # 读取通用数据集的评测结果
         additional_eval_data, general_avg_data = read_aggregated_eval(step_dir)
         eval_data.update(additional_eval_data)
         
@@ -183,7 +183,7 @@ def generate_results_table_step(exp_name, temperature, save_path_dir, base_model
     
     # 收集所有数学数据集名称
     math_datasets_set = set()
-    all_general_datasets = ['bbeh', 'mmlupro', 'supergpqa']
+    all_general_datasets = ['bbeh', 'mmlupro', 'supergpqa', 'gpqa']
     
     # 先遍历一次收集数学数据集名称
     for step_num, step_dir in steps:
