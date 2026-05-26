@@ -98,10 +98,8 @@ def _prepare_bbeh(
                 continue
             item = json.loads(line)
             question = str(item["question"])
-            new_question, skill_ids = _inject_question(manager, template_text, question, top_k=top_k)
-            item["original_question"] = question
+            new_question, _skill_ids = _inject_question(manager, template_text, question, top_k=top_k)
             item["question"] = new_question
-            item["skill_id"] = skill_ids
             fout.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
@@ -118,18 +116,12 @@ def _prepare_mmlupro(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_parquet(in_path)
-    original_questions = []
-    skill_ids_col = []
     new_questions = []
     for question in df["question"].tolist():
         question = str(question)
-        new_question, skill_ids = _inject_question(manager, template_text, question, top_k=top_k)
-        original_questions.append(question)
+        new_question, _skill_ids = _inject_question(manager, template_text, question, top_k=top_k)
         new_questions.append(new_question)
-        skill_ids_col.append(skill_ids)
-    df["original_question"] = original_questions
     df["question"] = new_questions
-    df["skill_id"] = skill_ids_col
     df.to_parquet(out_path, index=False)
 
 
@@ -152,10 +144,8 @@ def _prepare_supergpqa(
                 continue
             item = json.loads(line)
             question = str(item["question"])
-            new_question, skill_ids = _inject_question(manager, template_text, question, top_k=top_k)
-            item["original_question"] = question
+            new_question, _skill_ids = _inject_question(manager, template_text, question, top_k=top_k)
             item["question"] = new_question
-            item["skill_id"] = skill_ids
             fout.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
