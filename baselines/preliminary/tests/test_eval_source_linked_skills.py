@@ -57,14 +57,9 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
             def fake_server(method: str, messages, args, teacher_urls):
                 return fake_api(method, messages, args)
 
-            class FakeClient:
-                def __init__(self, *args, **kwargs) -> None:
-                    pass
-
-                def generate_sync(self, prompts, sampling, request_timeout=None):
-                    n = int(sampling["n"])
-                    text = "reasoning here \\boxed{3}"
-                    return [type("Resp", (), {"outputs": [type("Out", (), {"text": text})() for _ in range(n)]})()]
+            def fake_rollout(**kwargs):
+                n = int(kwargs["rollout_n"])
+                return ["reasoning here \\boxed{3}" for _ in range(n)]
 
             args = mock.Mock(
                 trajectories=str(traj),
@@ -93,7 +88,7 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
 
             with mock.patch("baselines.preliminary.eval_source_linked_skills._call_api_teacher", side_effect=fake_api), \
                 mock.patch("baselines.preliminary.eval_source_linked_skills._call_server_teacher", side_effect=fake_server), \
-                mock.patch("baselines.preliminary.eval_source_linked_skills.VLLMHTTPClient", FakeClient):
+                mock.patch("baselines.preliminary.eval_source_linked_skills._rollout_prompt", side_effect=fake_rollout):
                 self.assertEqual(run_eval(args), 0)
 
             details = read_jsonl(out_dir / "details.jsonl")

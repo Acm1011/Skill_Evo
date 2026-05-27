@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -13,9 +14,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+import httpx
+
 from baselines.ReasoningBankMath.io_utils import read_jsonl, write_jsonl
 from baselines.SkillRL.student_rollout import grade_if_possible
-from baselines.SkillRL.vllm_http_client import VLLMHTTPClient
 from baselines.preliminary.eval_source_linked_skills import group_questions
 
 DEFAULT_TRAJECTORIES = "Skill_Evo/baselines/SkillRL/outputs/trajectories_from_merged_v1_v2.jsonl"
@@ -163,6 +165,38 @@ def _check_health(url: str) -> bool:
         return False
 
 
+def _rollout_prompt(
+    *,
+    server_urls: List[str],
+    prompt: str,
+    question: str,
+    ground_truth: Any,
+    args: argparse.Namespace,
+) -> List[str]:
+    if not server_urls:
+        raise ValueError("server_urls is empty")
+    base_url = random.choice(server_urls).rstrip("/")
+    payload: Dict[str, Any] = {
+        "data_records": [{"prompt": prompt, "question": question, "gt": ground_truth or ""}],
+        "num_questions": 1,
+        "suffix": "preliminary_skill_drift_eval",
+        "rollout_n": args.student_rollout_n,
+        "max_tokens": args.student_max_tokens,
+        "temperature": args.student_temperature,
+        "top_p": args.student_top_p,
+        "top_k": getattr(args, "student_top_k", 50),
+    }
+    with httpx.Client(timeout=args.student_timeout) as client:
+        resp = client.post(f"{base_url}/rollout", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    results = data.get("results") or []
+    if not results:
+        raise RuntimeError(f"No results in rollout response: {data.keys()}")
+    responses = (results[0] or {}).get("responses") or []
+    return [str(x) for x in responses]
+
+
 class RolloutServerManager:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -215,19 +249,19 @@ class RolloutServerManager:
 
 def _run_prompt_rollout(
     *,
-    client: VLLMHTTPClient,
+    server_urls: List[str],
     prompt: str,
+    question: str,
     ground_truth: Any,
     args: argparse.Namespace,
 ) -> Tuple[List[Dict[str, Any]], float, int]:
-    sampling = {
-        "max_tokens": args.student_max_tokens,
-        "temperature": args.student_temperature,
-        "top_p": args.student_top_p,
-        "n": args.student_rollout_n,
-    }
-    outs = client.generate_sync([prompt], sampling, request_timeout=args.student_timeout)
-    responses = [out.text for out in outs[0].outputs]
+    responses = _rollout_prompt(
+        server_urls=server_urls,
+        prompt=prompt,
+        question=question,
+        ground_truth=ground_truth,
+        args=args,
+    )
     rows: List[Dict[str, Any]] = []
     correct = 0
     for attempt_idx, text in enumerate(responses):
@@ -315,19 +349,13 @@ def evaluate_checkpoint(
     proc = manager.start(checkpoint)
     try:
         server_urls = _resolve_server_urls(args.rollout_host, args.rollout_base_port, args.n_gpus)
-        client = VLLMHTTPClient(
-            server_urls=server_urls,
-            timeout=args.student_timeout,
-            max_retries=args.student_max_retries,
-            served_model_name=args.served_model_name or None,
-            max_concurrent=max(0, args.student_max_concurrent),
-        )
         baseline_results: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for question in questions:
             key = _question_lookup_key(question)
             baseline_rows, baseline_acc, baseline_correct = _run_prompt_rollout(
-                client=client,
+                server_urls=server_urls,
                 prompt=_baseline_prompt(question),
+                question=question["meta"]["problem"],
                 ground_truth=question["meta"]["ground_truth"],
                 args=args,
             )
@@ -385,8 +413,9 @@ def evaluate_checkpoint(
                 try:
                     prompt = _question_prompt(question, solve_template, str(skill_row.get("skill_text") or ""))
                     rows, skill_acc, skill_correct = _run_prompt_rollout(
-                        client=client,
+                        server_urls=server_urls,
                         prompt=prompt,
+                        question=meta["problem"],
                         ground_truth=meta["ground_truth"],
                         args=args,
                     )
@@ -494,6 +523,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--student-rollout-n", type=int, default=4)
     parser.add_argument("--student-temperature", type=float, default=0.7)
     parser.add_argument("--student-top-p", type=float, default=0.95)
+    parser.add_argument("--student-top-k", type=int, default=50)
     parser.add_argument("--student-max-tokens", type=int, default=4096)
     parser.add_argument("--student-timeout", type=float, default=600.0)
     parser.add_argument("--student-max-retries", type=int, default=3)

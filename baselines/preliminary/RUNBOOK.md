@@ -233,3 +233,18 @@ bash Skill_Evo/baselines/preliminary/scripts/run_eval_skill_drift_across_checkpo
 - `per_checkpoint/<checkpoint_name>/summary.json` 存在
 - `cross_checkpoint_summary.json` 非空
 - 同一个 `method + teacher_backend` 在 `cross_checkpoint_summary.json` 中有多个 checkpoint 记录
+
+## 常见错误
+
+如果日志里反复出现：
+
+```text
+Server http://127.0.0.1:8760: {"detail":"Not Found"}
+```
+
+通常表示客户端在访问 OpenAI-compatible `/v1/completions`，但 `start_rollout_servers.sh` 启动的是 `solver_offline_rollout_server`，它提供的是 `/rollout`。当前 `preliminary` 两个实验已经统一使用 `/rollout` 协议；如果仍看到这个错误，先确认运行的是最新的：
+
+```bash
+python -m baselines.preliminary.eval_source_linked_skills ...
+python -m baselines.preliminary.eval_skill_drift_across_checkpoints ...
+```

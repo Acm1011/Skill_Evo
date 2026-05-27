@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import httpx
 
 from baselines.ExpeLMath.memory_parser import parse_teacher_output as parse_expel_output
 from baselines.ExpeLMath.retrieve_memory import format_retrieved_prompt as format_expel_prompt
@@ -25,7 +28,6 @@ from baselines.SkillRL.teacher_distill import (
     rollout_complete as skillrl_rollout_complete,
 )
 from baselines.SkillRL.text_utils import parse_json_object, topic_slug
-from baselines.SkillRL.vllm_http_client import VLLMHTTPClient
 
 TEACHER_BACKENDS = ("api_teacher", "server_teacher")
 METHODS = ("skillrl", "reasoningbank", "expelmath")
@@ -375,7 +377,7 @@ def run_student_rollout(
     question: Dict[str, Any],
     skill_row: Dict[str, Any],
     solve_template: str,
-    client: VLLMHTTPClient,
+    server_urls: List[str],
     args: argparse.Namespace,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     meta = question["meta"]
@@ -401,15 +403,15 @@ def run_student_rollout(
         retrieved_context=skill_row["skill_text"],
         question=meta["problem"],
     )
-    sampling = {
-        "max_tokens": args.student_max_tokens,
-        "temperature": args.student_temperature,
-        "top_p": args.student_top_p,
-        "n": args.student_rollout_n,
-    }
     try:
-        outs = client.generate_sync([prompt], sampling, request_timeout=args.student_timeout)
-        responses = [out.text for out in outs[0].outputs]
+        responses = _rollout_prompt(
+            server_urls=server_urls,
+            prompt=prompt,
+            question=meta["problem"],
+            ground_truth=meta["ground_truth"],
+            rollout_n=args.student_rollout_n,
+            args=args,
+        )
     except Exception as e:
         detail = {
             "source_idx": meta["source_idx"],
@@ -522,19 +524,45 @@ def _resolve_urls(cli_urls: Optional[Sequence[str]]) -> List[str]:
     return resolve_rollout_server_urls(cli_urls)
 
 
+def _rollout_prompt(
+    *,
+    server_urls: List[str],
+    prompt: str,
+    question: str,
+    ground_truth: Any,
+    rollout_n: int,
+    args: argparse.Namespace,
+) -> List[str]:
+    if not server_urls:
+        raise ValueError("server_urls is empty")
+    base_url = random.choice(server_urls).rstrip("/")
+    payload: Dict[str, Any] = {
+        "data_records": [{"prompt": prompt, "question": question, "gt": ground_truth or ""}],
+        "num_questions": 1,
+        "suffix": "preliminary_source_linked_eval",
+        "rollout_n": rollout_n,
+        "max_tokens": args.student_max_tokens,
+        "temperature": args.student_temperature,
+        "top_p": args.student_top_p,
+        "top_k": getattr(args, "student_top_k", 50),
+    }
+    with httpx.Client(timeout=args.student_timeout) as client:
+        resp = client.post(f"{base_url}/rollout", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    results = data.get("results") or []
+    if not results:
+        raise RuntimeError(f"No results in rollout response: {data.keys()}")
+    responses = (results[0] or {}).get("responses") or []
+    return [str(x) for x in responses]
+
+
 def run_eval(args: argparse.Namespace) -> int:
     methods = _parse_methods(args.method)
     trajectories = read_jsonl(args.trajectories)
     questions = group_questions(trajectories, args.sample_size)
     student_urls = _resolve_urls(args.server_urls)
     teacher_urls = _resolve_urls(args.teacher_server_urls or args.server_urls)
-    client = VLLMHTTPClient(
-        server_urls=student_urls,
-        timeout=args.student_timeout,
-        max_retries=args.student_max_retries,
-        served_model_name=args.served_model_name or None,
-        max_concurrent=max(0, args.student_max_concurrent),
-    )
     templates = {
         "skillrl_teacher": _load_text(_prompt_dir("skillrl")),
         "rbm_teacher": _load_text(_prompt_dir("reasoningbank")),
@@ -562,7 +590,7 @@ def run_eval(args: argparse.Namespace) -> int:
                     question=question,
                     skill_row=skill_row,
                     solve_template=templates["solve"],
-                    client=client,
+                    server_urls=student_urls,
                     args=args,
                 )
                 rollout_rows.extend(per_attempt_rows)
@@ -598,6 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--teacher-timeout", type=float, default=600.0)
     p.add_argument("--student-temperature", type=float, default=0.7)
     p.add_argument("--student-top-p", type=float, default=0.95)
+    p.add_argument("--student-top-k", type=int, default=50)
     p.add_argument("--student-max-tokens", type=int, default=4096)
     p.add_argument("--student-timeout", type=float, default=600.0)
     p.add_argument("--student-max-retries", type=int, default=3)
