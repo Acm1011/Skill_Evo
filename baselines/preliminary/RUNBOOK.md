@@ -83,6 +83,11 @@ bash Skill_Evo/baselines/preliminary/scripts/run_eval_source_linked_skills.sh \
 - `--student-rollout-n 4`
 - `--rollout-host 127.0.0.1`
 - `--rollout-base-port 8760`
+- `--eval-max-workers 0`
+
+说明：
+- `--n-gpus` 负责启动多少个 rollout server
+- `--eval-max-workers` 负责题级并发数；默认 `0` 时会自动取 rollout server 数量
 
 ### 运行前检查
 

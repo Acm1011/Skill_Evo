@@ -18,6 +18,7 @@ TEACHER_API_BASE_URL="${EVAL_TEACHER_API_BASE_URL:-}"
 TEACHER_API_MODEL="${EVAL_TEACHER_API_MODEL:-}"
 TEACHER_API_KEY="${EVAL_TEACHER_API_KEY:-}"
 STUDENT_ROLLOUT_N=4
+EVAL_MAX_WORKERS="${EVAL_MAX_WORKERS:-0}"
 
 usage() {
   cat <<EOF
@@ -38,6 +39,7 @@ Options:
   --teacher-api-model <name>
   --teacher-api-key <key>
   --student-rollout-n <n>
+  --eval-max-workers <n>
 EOF
 }
 
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --teacher-api-model) TEACHER_API_MODEL="$2"; shift 2 ;;
     --teacher-api-key) TEACHER_API_KEY="$2"; shift 2 ;;
     --student-rollout-n) STUDENT_ROLLOUT_N="$2"; shift 2 ;;
+    --eval-max-workers) EVAL_MAX_WORKERS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
@@ -121,4 +124,5 @@ python -m baselines.preliminary.eval_source_linked_skills \
   --teacher-api-base-url "${TEACHER_API_BASE_URL}" \
   --teacher-api-model "${TEACHER_API_MODEL}" \
   --teacher-api-key "${TEACHER_API_KEY}" \
-  --student-rollout-n "${STUDENT_ROLLOUT_N}"
+  --student-rollout-n "${STUDENT_ROLLOUT_N}" \
+  --eval-max-workers "${EVAL_MAX_WORKERS}"

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import random
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -31,6 +33,21 @@ from baselines.SkillRL.text_utils import parse_json_object, topic_slug
 
 TEACHER_BACKENDS = ("api_teacher", "server_teacher")
 METHODS = ("skillrl", "reasoningbank", "expelmath")
+
+
+class _RoundRobinUrls:
+    def __init__(self, urls: Sequence[str]) -> None:
+        if not urls:
+            raise ValueError("urls is empty")
+        self._urls = [str(url).rstrip("/") for url in urls]
+        self._lock = threading.Lock()
+        self._index = 0
+
+    def next_url(self) -> str:
+        with self._lock:
+            url = self._urls[self._index]
+            self._index = (self._index + 1) % len(self._urls)
+            return url
 
 
 def _prompt_dir(method: str) -> Path:
@@ -524,6 +541,17 @@ def _resolve_urls(cli_urls: Optional[Sequence[str]]) -> List[str]:
     return resolve_rollout_server_urls(cli_urls)
 
 
+def _default_eval_workers(
+    *,
+    student_urls: Sequence[str],
+    teacher_urls: Sequence[str],
+    requested: int,
+) -> int:
+    if requested > 0:
+        return requested
+    return max(1, len(student_urls), len(teacher_urls))
+
+
 def _rollout_prompt(
     *,
     server_urls: List[str],
@@ -563,6 +591,13 @@ def run_eval(args: argparse.Namespace) -> int:
     questions = group_questions(trajectories, args.sample_size)
     student_urls = _resolve_urls(args.server_urls)
     teacher_urls = _resolve_urls(args.teacher_server_urls or args.server_urls)
+    student_pool = _RoundRobinUrls(student_urls)
+    teacher_pool = _RoundRobinUrls(teacher_urls)
+    eval_workers = _default_eval_workers(
+        student_urls=student_urls,
+        teacher_urls=teacher_urls,
+        requested=int(getattr(args, "eval_max_workers", 0) or 0),
+    )
     templates = {
         "skillrl_teacher": _load_text(_prompt_dir("skillrl")),
         "rbm_teacher": _load_text(_prompt_dir("reasoningbank")),
@@ -576,23 +611,37 @@ def run_eval(args: argparse.Namespace) -> int:
         for teacher_backend in TEACHER_BACKENDS:
             skill_rows: List[Dict[str, Any]] = []
             rollout_rows: List[Dict[str, Any]] = []
-            for question in questions:
+            ordered_results: List[Tuple[int, Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]] = []
+
+            def _process_question(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+                question_idx, question = item
+                bound_teacher_urls = [teacher_pool.next_url()] if teacher_backend == "server_teacher" else teacher_urls
                 skill_row = generate_skill_for_question(
                     question=question,
                     method=method,
                     teacher_backend=teacher_backend,
                     args=args,
-                    teacher_urls=teacher_urls,
+                    teacher_urls=bound_teacher_urls,
                     templates=templates,
                 )
-                skill_rows.append(skill_row)
+                bound_student_urls = [student_pool.next_url()]
                 per_attempt_rows, detail = run_student_rollout(
                     question=question,
                     skill_row=skill_row,
                     solve_template=templates["solve"],
-                    server_urls=student_urls,
+                    server_urls=bound_student_urls,
                     args=args,
                 )
+                return question_idx, skill_row, per_attempt_rows, detail
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
+                futures = [executor.submit(_process_question, item) for item in enumerate(questions)]
+                for future in concurrent.futures.as_completed(futures):
+                    ordered_results.append(future.result())
+
+            ordered_results.sort(key=lambda row: row[0])
+            for _, skill_row, per_attempt_rows, detail in ordered_results:
+                skill_rows.append(skill_row)
                 rollout_rows.extend(per_attempt_rows)
                 details_rows.append(detail)
 
@@ -631,6 +680,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--student-timeout", type=float, default=600.0)
     p.add_argument("--student-max-retries", type=int, default=3)
     p.add_argument("--student-max-concurrent", type=int, default=0)
+    p.add_argument("--eval-max-workers", type=int, default=0)
     return p
 
 
