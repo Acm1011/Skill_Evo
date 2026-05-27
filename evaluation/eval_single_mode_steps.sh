@@ -13,6 +13,8 @@
 #   --base_model_name   基础模型名称 (默认: Qwen2.5-Math-1.5B)
 #   --temperature       采样温度 (默认: 0.6)
 #   --sample_ratio      采样比例 (默认: 0.1，用于 mmlupro/supergpqa)
+#   --mmlupro_categories    可选：指定 MMLUPro 要跑的类别（逗号分隔）
+#   --supergpqa_categories  可选：指定 SuperGPQA 要跑的类别（逗号分隔）
 #   --skip_base_model   跳过基础模型评测 (默认: false)
 #   --run_general       评测模式，可选 general、math、both（默认: math）
 #   --temp_data_file    temp_data parquet 路径（默认: 训练后生成的 temp_data_skill.parquet）
@@ -42,6 +44,8 @@ STEPS="${SB_STEPS:-}"
 BASB_MODEL_NAME="${SB_MODEL_NAME:-Qwen3-4B-Instruct-2507}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 SAMPLE_RATIO="${SAMPLE_RATIO:-0.1}"
+MMLUPRO_CATEGORIES="${MMLUPRO_CATEGORIES:-}"
+SUPERGPQA_CATEGORIES="${SUPERGPQA_CATEGORIES:-}"
 SKIP_BASE_MODEL="${SKIP_BASE_MODEL:-false}"
 RUN_GENERAL_EVAL="${RUN_GENERAL_EVAL:-math}"
 GENERAL_DATA_MODE="${GENERAL_DATA_MODE:-raw}"
@@ -73,6 +77,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --sample_ratio)
             SAMPLE_RATIO="$2"
+            shift 2
+            ;;
+        --mmlupro_categories)
+            MMLUPRO_CATEGORIES="$2"
+            shift 2
+            ;;
+        --supergpqa_categories)
+            SUPERGPQA_CATEGORIES="$2"
             shift 2
             ;;
         --skip_base_model)
@@ -314,6 +326,8 @@ echo "  通用数据模式:  $GENERAL_DATA_MODE"
 echo "  通用技能数据:  ${GENERAL_SKILL_DATA_DIR:-<none>}"
 echo "  温度:          $TEMPERATURE"
 echo "  采样比例:      $SAMPLE_RATIO"
+echo "  MMLUPro 类别:  ${MMLUPRO_CATEGORIES:-<all>}"
+echo "  SuperGPQA 类别: ${SUPERGPQA_CATEGORIES:-<all>}"
 echo "  temp_data 文件: $TEMP_DATA_FILE"
 echo "  greedy_data 文件: $GREEDY_DATA_FILE"
 echo "  评测数据目录:  $CUSTOM_EVAL_DATA_DIR"
@@ -373,26 +387,12 @@ model_paths=()
 
 base_model_eval_results_dir=${eval_saved_path_dir}/step_0
 base_model_path="${model_dir}/${BASB_MODEL_NAME}"
-BASE_MODEL_NEEDS_EVAL="false"
-
-# 检查是否需要评测基础模型
 if [ "$SKIP_BASE_MODEL" != "true" ]; then
     if [ ! -d "${base_model_path}" ]; then
         echo "Warning: 基础模型不存在: ${base_model_path}，跳过..."
-    elif [ -d "${base_model_eval_results_dir}" ]; then
-        # 检查是否有完整的评测结果
-        if [ -f "${base_model_eval_results_dir}/aggregated_eval_results.json" ]; then
-            echo "基础模型 ${BASB_MODEL_NAME} 评测结果已存在: ${base_model_eval_results_dir}"
-        else
-            echo "基础模型 ${BASB_MODEL_NAME} 评测结果不完整，需要重新评测"
-            BASE_MODEL_NEEDS_EVAL="true"
-            model_list+=("${BASB_MODEL_NAME}")
-            model_paths+=("${base_model_path}")
-        fi
     else
-        echo "基础模型 ${BASB_MODEL_NAME} 需要评测，结果将保存到: ${base_model_eval_results_dir}"
-        BASE_MODEL_NEEDS_EVAL="true"
-    model_list+=("${BASB_MODEL_NAME}")
+        echo "基础模型 ${BASB_MODEL_NAME} 已加入调度，具体任务会按单数据集结果判断是否跳过"
+        model_list+=("${BASB_MODEL_NAME}")
         model_paths+=("${base_model_path}")
     fi
 else
@@ -494,12 +494,56 @@ check_dataset_completed() {
         result_file="${eval_saved_path_dir}/${model_name}/${dataset_name}_final_results.json"
     fi
     
-    if [ -f "$result_file" ]; then
-        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Dataset [${dataset_name}] for model [${model_name}] already completed"
-        return 0
-    else
+    if [ ! -f "$result_file" ]; then
         return 1
     fi
+
+    local requested_categories=""
+    case "$dataset_name" in
+        mmlupro)
+            requested_categories="$MMLUPRO_CATEGORIES"
+            ;;
+        supergpqa)
+            requested_categories="$SUPERGPQA_CATEGORIES"
+            ;;
+    esac
+
+    if python - "$result_file" "$requested_categories" <<'PY'
+import json
+import sys
+
+result_file = sys.argv[1]
+requested_raw = sys.argv[2]
+
+with open(result_file, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+requested = sorted({item.strip().lower() for item in requested_raw.split(",") if item.strip()})
+stored = data.get("selected_categories")
+mode = data.get("category_selection_mode")
+
+if not requested:
+    if stored is None or mode in (None, "all"):
+        sys.exit(0)
+    sys.exit(1)
+
+if stored is None:
+    sys.exit(1)
+
+stored_normalized = sorted({str(item).strip().lower() for item in stored if str(item).strip()})
+
+if mode == "all":
+    sys.exit(1)
+
+sys.exit(0 if stored_normalized == requested else 1)
+PY
+    then
+        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Dataset [${dataset_name}] for model [${model_name}] already completed with matching categories"
+        return 0
+    fi
+
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Dataset [${dataset_name}] for model [${model_name}] exists but categories do not match current request, will rerun"
+    return 1
 }
 
 check_main_task_completed() {
@@ -541,14 +585,14 @@ start_additional_eval_job() {
     
     # 从 model_name 提取 step（格式：xxx-stepN）
     local step=$(echo "$model_name" | sed -n 's/.*-step\([0-9]*\)$/\1/p')
-    local step_arg=""
     local target_save_dir="${eval_saved_path_dir}"
+    local -a extra_args=()
     
     if [ -n "$step" ]; then
-        step_arg="--step ${step}"
+        extra_args+=(--step "$step")
     elif [ "$model_name" == "$BASB_MODEL_NAME" ]; then
         # Base model 也按 step 目录组织，固定保存到 step_0
-        step_arg="--step 0"
+        extra_args+=(--step "0")
     fi
     
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting evaluation [${eval_script}] for model [${model_name}] (step=${step:-base}) on GPU [${gpu_id}]"
@@ -556,14 +600,27 @@ start_additional_eval_job() {
     if [ "$GENERAL_DATA_MODE" = "skill" ]; then
         general_eval_data_dir="${GENERAL_SKILL_DATA_DIR}"
     fi
-    
+
+    case "$(basename "$eval_script")" in
+        eval_mmlupro_step.py)
+            if [ -n "$MMLUPRO_CATEGORIES" ]; then
+                extra_args+=(--categories "$MMLUPRO_CATEGORIES")
+            fi
+            ;;
+        eval_supergpqa_step.py)
+            if [ -n "$SUPERGPQA_CATEGORIES" ]; then
+                extra_args+=(--categories "$SUPERGPQA_CATEGORIES")
+            fi
+            ;;
+    esac
+
     CUDA_VISIBLE_DEVICES="${gpu_id}" python "${eval_script}" \
         --model_path "${model_path}" \
         --model_name "${model_name}" \
         --save_path_dir "${target_save_dir}" \
         --data_path_dir "${general_eval_data_dir}" \
         --sample_ratio "${SAMPLE_RATIO}" \
-        ${step_arg} &
+        "${extra_args[@]}" &
     local pid=$!
     
     sleep 10
@@ -890,6 +947,15 @@ if [ "$SHOULD_RUN_GENERAL" = "true" ]; then
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All additional evaluations completed! (${#task_queue[@]} tasks)"
 else
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] General evaluation skipped (RUN_GENERAL_EVAL=${RUN_GENERAL_EVAL})"
+fi
+
+if [ "$SHOULD_RUN_GENERAL" = "true" ]; then
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Aggregating general evaluation results per step..."
+    for step_dir in "${eval_saved_path_dir}"/step_*; do
+        if [ -d "$step_dir" ]; then
+            python aggregate_general_eval_results_step.py --step_dir "${step_dir}" || true
+        fi
+    done
 fi
 
 # =============================================================================

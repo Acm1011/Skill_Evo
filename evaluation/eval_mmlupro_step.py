@@ -118,6 +118,36 @@ def get_prediction(output):
     return random.choice(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'])
 
 
+def parse_selected_categories(categories_arg, all_categories):
+    if not categories_arg or not categories_arg.strip():
+        return list(all_categories), "all"
+
+    category_map = {category.lower(): category for category in all_categories}
+    requested = []
+    invalid = []
+
+    for raw_name in categories_arg.split(","):
+        normalized = raw_name.strip()
+        if not normalized:
+            continue
+        matched = category_map.get(normalized.lower())
+        if matched is None:
+            invalid.append(normalized)
+            continue
+        if matched not in requested:
+            requested.append(matched)
+
+    if invalid:
+        raise ValueError(
+            f"无效的 MMLU-Pro 类别: {invalid}。可选类别: {all_categories}"
+        )
+
+    if not requested:
+        return list(all_categories), "all"
+
+    return requested, "subset"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MMLU-Pro 评测脚本（支持按 step 保存）")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model directory")
@@ -130,6 +160,12 @@ if __name__ == "__main__":
         type=float,
         default=0.1,
         help="Fraction of samples to evaluate per category (0-1, 0 means no subsampling, default 0.1)",
+    )
+    parser.add_argument(
+        "--categories",
+        type=str,
+        default="",
+        help="Comma-separated MMLU-Pro categories to evaluate. Default evaluates all categories.",
     )
     parser.add_argument("--output_file", type=str, default=None, help="File to save results (optional)")
     args = parser.parse_args()
@@ -207,9 +243,12 @@ if __name__ == "__main__":
     
     llm = LLM(model=args.model_path, tensor_parallel_size=1, gpu_memory_utilization=0.85)
     
-    categories = ['computer science', 'math', 'chemistry', 'engineering', 'law', 'biology',
-                  'health', 'physics', 'business', 'philosophy', 'economics', 'other',
-                  'psychology', 'history']
+    all_categories = ['computer science', 'math', 'chemistry', 'engineering', 'law', 'biology',
+                      'health', 'physics', 'business', 'philosophy', 'economics', 'other',
+                      'psychology', 'history']
+    categories, category_selection_mode = parse_selected_categories(args.categories, all_categories)
+    print(f"  类别选择模式: {category_selection_mode}")
+    print(f"  评测类别: {categories}")
     per_category_accuracy = {c: [0, 0] for c in categories}
     success, fail = 0, 0
     answers = []
@@ -435,7 +474,10 @@ if __name__ == "__main__":
             "fail": fail,
             "total": success + fail,
             "sample_ratio": args.sample_ratio,
-            "per_category_accuracy": category_accuracy_report
+            "per_category_accuracy": category_accuracy_report,
+            "selected_categories": categories,
+            "all_categories": all_categories,
+            "category_selection_mode": category_selection_mode,
         }, f, indent=2)
     
     print(f"结果已保存: {final_results_file}")
