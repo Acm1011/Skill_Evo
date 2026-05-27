@@ -12,8 +12,9 @@
 #   --steps             可选：手动指定要评测的 steps (空格分隔)，不指定则自动发现
 #   --base_model_name   基础模型名称 (默认: Qwen2.5-Math-1.5B)
 #   --temperature       采样温度 (默认: 0.6)
-#   --sample_ratio      采样比例 (默认: 0.1，用于 bbeh/mmlupro/supergpqa)
+#   --sample_ratio      采样比例 (默认: 0.1，用于 mmlupro/supergpqa)
 #   --skip_base_model   跳过基础模型评测 (默认: false)
+#   --run_general       评测模式，可选 general、math、both（默认: math）
 #   --temp_data_file    temp_data parquet 路径（默认: 训练后生成的 temp_data_skill.parquet）
 #   --greedy_data_file  greedy_data parquet 路径（默认: 训练后生成的 greedy_data_skill.parquet）
 #
@@ -42,7 +43,7 @@ BASB_MODEL_NAME="${SB_MODEL_NAME:-Qwen3-4B-Instruct-2507}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 SAMPLE_RATIO="${SAMPLE_RATIO:-0.1}"
 SKIP_BASE_MODEL="${SKIP_BASE_MODEL:-false}"
-RUN_GENERAL_EVAL="${RUN_GENERAL_EVAL:-false}"
+RUN_GENERAL_EVAL="${RUN_GENERAL_EVAL:-math}"
 GENERAL_DATA_MODE="${GENERAL_DATA_MODE:-raw}"
 GENERAL_SKILL_DATA_DIR="${GENERAL_SKILL_DATA_DIR:-}"
 TEMP_DATA_FILE="${TEMP_DATA_FILE:-/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b/temp_data_skill.parquet}"
@@ -79,8 +80,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --run_general)
-            RUN_GENERAL_EVAL="true"
-            shift
+            RUN_GENERAL_EVAL="$2"
+            shift 2
             ;;
         --general_data_mode)
             GENERAL_DATA_MODE="$2"
@@ -125,7 +126,23 @@ if [ "$GENERAL_DATA_MODE" != "raw" ] && [ "$GENERAL_DATA_MODE" != "skill" ]; the
     echo "Error: GENERAL_DATA_MODE 只能是 raw 或 skill，当前: $GENERAL_DATA_MODE"
     exit 1
 fi
-if [ "$RUN_GENERAL_EVAL" = "true" ] && [ "$GENERAL_DATA_MODE" = "skill" ] && [ ! -d "$GENERAL_SKILL_DATA_DIR" ]; then
+if [ "$RUN_GENERAL_EVAL" != "general" ] && [ "$RUN_GENERAL_EVAL" != "math" ] && [ "$RUN_GENERAL_EVAL" != "both" ]; then
+    echo "Error: RUN_GENERAL_EVAL 只能是 general、math 或 both，当前: $RUN_GENERAL_EVAL"
+    exit 1
+fi
+
+SHOULD_RUN_GENERAL="false"
+SHOULD_RUN_MATH="false"
+
+if [ "$RUN_GENERAL_EVAL" = "general" ] || [ "$RUN_GENERAL_EVAL" = "both" ]; then
+    SHOULD_RUN_GENERAL="true"
+fi
+
+if [ "$RUN_GENERAL_EVAL" = "math" ] || [ "$RUN_GENERAL_EVAL" = "both" ]; then
+    SHOULD_RUN_MATH="true"
+fi
+
+if [ "$SHOULD_RUN_GENERAL" = "true" ] && [ "$GENERAL_DATA_MODE" = "skill" ] && [ ! -d "$GENERAL_SKILL_DATA_DIR" ]; then
     echo "Error: general skill data dir 不存在: $GENERAL_SKILL_DATA_DIR"
     exit 1
 fi
@@ -292,7 +309,7 @@ echo "  Checkpoint 目录: $CKPTS_DIR"
 echo "  评测 Steps:    $STEPS"
 echo "  基础模型:      $BASB_MODEL_NAME"
 echo "  跳过基础模型:  $SKIP_BASE_MODEL"
-echo "  跑通用评测:    $RUN_GENERAL_EVAL"
+echo "  评测模式:      $RUN_GENERAL_EVAL"
 echo "  通用数据模式:  $GENERAL_DATA_MODE"
 echo "  通用技能数据:  ${GENERAL_SKILL_DATA_DIR:-<none>}"
 echo "  温度:          $TEMPERATURE"
@@ -314,7 +331,6 @@ TASKS=(
 )
 
 ADDITIONAL_EVAL_DATASETS=(
-    "eval_bbeh_step.py"
     "eval_mmlupro_step.py"
     "eval_supergpqa_step.py"
 )
@@ -654,7 +670,7 @@ cleanup_zombie_processes() {
                 orphaned_pids+=("$pid")
             fi
         fi
-    done < <(ps aux | grep -E "eval_all_math_step.py|eval_bbeh_step.py|eval_mmlupro_step.py|eval_supergpqa_step.py" | grep -v grep)
+    done < <(ps aux | grep -E "eval_all_math_step.py|eval_mmlupro_step.py|eval_supergpqa_step.py" | grep -v grep)
     
     for pid in "${orphaned_pids[@]}"; do
         echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Killing orphaned process PID [${pid}]"
@@ -788,7 +804,7 @@ check_completed_jobs() {
 # 主执行循环 - 额外评测数据集
 # =============================================================================
 
-if [ "$RUN_GENERAL_EVAL" = "true" ]; then
+if [ "$SHOULD_RUN_GENERAL" = "true" ]; then
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting additional evaluation datasets"
 
     declare -a task_queue=()
@@ -873,7 +889,7 @@ if [ "$RUN_GENERAL_EVAL" = "true" ]; then
 
     echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All additional evaluations completed! (${#task_queue[@]} tasks)"
 else
-    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] General evaluation disabled (use --run_general to enable)"
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] General evaluation skipped (RUN_GENERAL_EVAL=${RUN_GENERAL_EVAL})"
 fi
 
 # =============================================================================
@@ -892,92 +908,92 @@ gpu_dataset=()
 # 主执行循环 - 数学任务
 # =============================================================================
 
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting math tasks"
+if [ "$SHOULD_RUN_MATH" = "true" ]; then
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Starting math tasks"
 
-declare -a math_task_queue=()
+    declare -a math_task_queue=()
 
-for i in "${!model_list[@]}"; do
-    model_name="${model_list[$i]}"
-    model_path="${model_paths[$i]}"
-    
-    if [ ! -d "$model_path" ]; then
-        continue
-    fi
-    
-    for dataset in "${TASKS[@]}"; do
-        if check_main_task_completed "$model_name" "$dataset"; then
-            continue
-        fi
-        math_task_queue+=("${model_name}|${model_path}|${dataset}")
-    done
-done
-
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Math task queue: ${#math_task_queue[@]} tasks"
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Task queue details:"
-for i in "${!math_task_queue[@]}"; do
-    echo "  [$i] ${math_task_queue[$i]}"
-done
-
-# 如果没有任务，跳过此循环
-if [ ${#math_task_queue[@]} -eq 0 ]; then
-    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] No math tasks to run"
-else
-
-cleanup_counter=0
-math_task_index=0
-
-while [ $math_task_index -lt ${#math_task_queue[@]} ] || [ ${#pids[@]} -gt 0 ]; do
-    # 定期综合清理
-    cleanup_counter=$((cleanup_counter + 1))
-    if [ $((cleanup_counter % 10)) -eq 0 ]; then
-        comprehensive_cleanup
-    else
-        cleanup_zombie_processes
-    fi
-    
-    check_completed_jobs
-    available_gpus=($(get_available_gpus))
-    
-    while [ $math_task_index -lt ${#math_task_queue[@]} ] && [ ${#available_gpus[@]} -ge 1 ]; do
-        task="${math_task_queue[$math_task_index]}"
-        IFS='|' read -r model_name model_path dataset <<< "$task"
+    for i in "${!model_list[@]}"; do
+        model_name="${model_list[$i]}"
+        model_path="${model_paths[$i]}"
         
-        if check_main_task_completed "$model_name" "$dataset"; then
-            echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] Math task $((math_task_index + 1))/${#math_task_queue[@]}: [${dataset}] for [${model_name}] already completed"
-            math_task_index=$((math_task_index + 1))
+        if [ ! -d "$model_path" ]; then
             continue
         fi
         
-        if [[ "${available_gpus[0]}" =~ ^[0-9]+$ ]]; then
-            if start_math_task_job "${available_gpus[0]}" "$model_path" "$model_name" "$dataset"; then
-                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [START] Math task $((math_task_index + 1))/${#math_task_queue[@]}: [${dataset}] for [${model_name}] on GPU ${available_gpus[0]}"
-                math_task_index=$((math_task_index + 1))
-                available_gpus=($(get_available_gpus))
-            else
-                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [RETRY] Math task $((math_task_index + 1))/${#math_task_queue[@]}: [${dataset}] for [${model_name}] failed to start, will retry"
-                break
+        for dataset in "${TASKS[@]}"; do
+            if check_main_task_completed "$model_name" "$dataset"; then
+                continue
             fi
-        else
-            echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Invalid GPU ID, skipping math task $((math_task_index + 1))/${#math_task_queue[@]}"
-            math_task_index=$((math_task_index + 1))
-        fi
+            math_task_queue+=("${model_name}|${model_path}|${dataset}")
+        done
     done
-    
-    if [ ${#pids[@]} -gt 0 ] || [ $math_task_index -lt ${#math_task_queue[@]} ]; then
-        completed=$((math_task_index - ${#pids[@]}))
-        total_tasks=${#math_task_queue[@]}
-        progress=0
-        if [ $total_tasks -gt 0 ]; then
-            progress=$((completed * 100 / total_tasks))
-        fi
-        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [STATUS] Math tasks: Running ${#pids[@]} jobs, Completed ${completed}/${total_tasks} (${progress}%), Pending $((total_tasks - math_task_index))"
-        sleep 30
+
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Math task queue: ${#math_task_queue[@]} tasks"
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] Task queue details:"
+    for i in "${!math_task_queue[@]}"; do
+        echo "  [$i] ${math_task_queue[$i]}"
+    done
+
+    if [ ${#math_task_queue[@]} -eq 0 ]; then
+        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] No math tasks to run"
+    else
+        cleanup_counter=0
+        math_task_index=0
+
+        while [ $math_task_index -lt ${#math_task_queue[@]} ] || [ ${#pids[@]} -gt 0 ]; do
+            cleanup_counter=$((cleanup_counter + 1))
+            if [ $((cleanup_counter % 10)) -eq 0 ]; then
+                comprehensive_cleanup
+            else
+                cleanup_zombie_processes
+            fi
+            
+            check_completed_jobs
+            available_gpus=($(get_available_gpus))
+            
+            while [ $math_task_index -lt ${#math_task_queue[@]} ] && [ ${#available_gpus[@]} -ge 1 ]; do
+                task="${math_task_queue[$math_task_index]}"
+                IFS='|' read -r model_name model_path dataset <<< "$task"
+                
+                if check_main_task_completed "$model_name" "$dataset"; then
+                    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] Math task $((math_task_index + 1))/${#math_task_queue[@]}: [${dataset}] for [${model_name}] already completed"
+                    math_task_index=$((math_task_index + 1))
+                    continue
+                fi
+                
+                if [[ "${available_gpus[0]}" =~ ^[0-9]+$ ]]; then
+                    if start_math_task_job "${available_gpus[0]}" "$model_path" "$model_name" "$dataset"; then
+                        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [START] Math task $((math_task_index + 1))/${#math_task_queue[@]}: [${dataset}] for [${model_name}] on GPU ${available_gpus[0]}"
+                        math_task_index=$((math_task_index + 1))
+                        available_gpus=($(get_available_gpus))
+                    else
+                        echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [RETRY] Math task $((math_task_index + 1))/${#math_task_queue[@]}: [${dataset}] for [${model_name}] failed to start, will retry"
+                        break
+                    fi
+                else
+                    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [WARN] Invalid GPU ID, skipping math task $((math_task_index + 1))/${#math_task_queue[@]}"
+                    math_task_index=$((math_task_index + 1))
+                fi
+            done
+            
+            if [ ${#pids[@]} -gt 0 ] || [ $math_task_index -lt ${#math_task_queue[@]} ]; then
+                completed=$((math_task_index - ${#pids[@]}))
+                total_tasks=${#math_task_queue[@]}
+                progress=0
+                if [ $total_tasks -gt 0 ]; then
+                    progress=$((completed * 100 / total_tasks))
+                fi
+                echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [STATUS] Math tasks: Running ${#pids[@]} jobs, Completed ${completed}/${total_tasks} (${progress}%), Pending $((total_tasks - math_task_index))"
+                sleep 30
+            fi
+        done
     fi
-done
 
-fi  # 结束 math_task_queue 非空检查
-
-echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All math tasks completed! (${#math_task_queue[@]} tasks)"
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [COMPLETE] All math tasks completed! (${#math_task_queue[@]} tasks)"
+else
+    echo "==> [$(date '+%Y-%m-%d %H:%M:%S')] [SKIP] Math evaluation skipped (RUN_GENERAL_EVAL=${RUN_GENERAL_EVAL})"
+fi
 
 # =============================================================================
 # 聚合结果
