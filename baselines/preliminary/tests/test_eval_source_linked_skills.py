@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from baselines.ReasoningBankMath.io_utils import read_jsonl
-from baselines.preliminary.eval_source_linked_skills import group_questions, resume_status, run_eval
+from baselines.preliminary.eval_source_linked_skills import format_resume_status, group_questions, resume_status, run_eval
 
 
 class EvalSourceLinkedSkillsTests(unittest.TestCase):
@@ -366,3 +366,26 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
             status = resume_status(args)
             self.assertFalse(status["complete"])
             self.assertTrue(any(not item["complete"] for item in status["statuses"]))
+
+    def test_format_resume_status_summarizes_counts_only(self) -> None:
+        text = format_resume_status(
+            {
+                "complete": False,
+                "methods": ["skillrl"],
+                "n_questions": 100,
+                "statuses": [
+                    {
+                        "method": "skillrl",
+                        "teacher_backend": "api_teacher",
+                        "complete": False,
+                        "missing_skill": ["1", "2", "3"],
+                        "missing_detail": ["4"],
+                        "missing_rollout": [],
+                    }
+                ],
+            }
+        )
+        self.assertIn("missing_skill=3", text)
+        self.assertIn("missing_detail=1", text)
+        self.assertIn("missing_rollout=0", text)
+        self.assertNotIn('["1", "2", "3"]', text)

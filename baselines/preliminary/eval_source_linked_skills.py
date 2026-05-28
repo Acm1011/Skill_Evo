@@ -614,6 +614,23 @@ def resume_status(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def format_resume_status(status: Dict[str, Any]) -> str:
+    lines = [
+        f"resume check: complete={status.get('complete')} methods={','.join(status.get('methods') or [])} n_questions={status.get('n_questions', 0)}"
+    ]
+    for item in status.get("statuses") or []:
+        lines.append(
+            "resume check:"
+            f" method={item.get('method')}"
+            f" teacher_backend={item.get('teacher_backend')}"
+            f" complete={item.get('complete')}"
+            f" missing_skill={len(item.get('missing_skill') or [])}"
+            f" missing_detail={len(item.get('missing_detail') or [])}"
+            f" missing_rollout={len(item.get('missing_rollout') or [])}"
+        )
+    return "\n".join(lines)
+
+
 def _parse_methods(raw: str) -> List[str]:
     value = (raw or "all").strip().lower()
     if value == "all":
@@ -815,7 +832,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.resume_check_only:
         status = resume_status(args)
-        print(json.dumps(status, ensure_ascii=False))
+        print(format_resume_status(status))
         return 0 if status["complete"] else 10
     if not args.teacher_api_base_url or not args.teacher_api_model:
         raise SystemExit("teacher api config is required: --teacher-api-base-url and --teacher-api-model")
