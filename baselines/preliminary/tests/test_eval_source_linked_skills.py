@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from baselines.ReasoningBankMath.io_utils import read_jsonl
-from baselines.preliminary.eval_source_linked_skills import group_questions, run_eval
+from baselines.preliminary.eval_source_linked_skills import group_questions, resume_status, run_eval
 
 
 class EvalSourceLinkedSkillsTests(unittest.TestCase):
@@ -240,3 +240,129 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
             rollout_rows = read_jsonl(out_dir / "student_rollout" / "skillrl" / "api_teacher.jsonl")
             self.assertEqual(len(rollout_rows), 1)
             self.assertEqual(rollout_rows[0]["source_idx"], 1)
+
+    def test_resume_status_reports_complete_when_all_outputs_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            traj = tmp / "traj.jsonl"
+            out_dir = tmp / "out"
+            row = {"idx": 1, "problem": "p1", "topic": "Math->A", "topic_key": "Math_A", "student_response": "good", "is_correct": True, "ground_truth": "1"}
+            traj.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            for teacher_backend in ("api_teacher", "server_teacher"):
+                skill_path = out_dir / "generated_skills" / "skillrl" / f"{teacher_backend}.jsonl"
+                skill_path.parent.mkdir(parents=True, exist_ok=True)
+                skill_path.write_text(
+                    json.dumps(
+                        {
+                            "source_idx": 1,
+                            "problem": "p1",
+                            "topic": "Math->A",
+                            "method": "skillrl",
+                            "teacher_backend": teacher_backend,
+                            "status": "ok",
+                            "skill_text": "cached skill",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                rollout_path = out_dir / "student_rollout" / "skillrl" / f"{teacher_backend}.jsonl"
+                rollout_path.parent.mkdir(parents=True, exist_ok=True)
+                rollout_path.write_text(
+                    json.dumps(
+                        {
+                            "source_idx": 1,
+                            "problem": "p1",
+                            "method": "skillrl",
+                            "teacher_backend": teacher_backend,
+                            "attempt_idx": 0,
+                            "student_response": "reasoning here \\boxed{1}",
+                            "is_correct": True,
+                            "ground_truth": "1",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+
+            details = [
+                {
+                    "source_idx": 1,
+                    "problem": "p1",
+                    "method": "skillrl",
+                    "teacher_backend": "api_teacher",
+                    "baseline_correct_count": 1,
+                    "baseline_rollout_count": 1,
+                    "baseline_acc": 1.0,
+                    "skill_correct_count": 1,
+                    "skill_rollout_count": 1,
+                    "skill_acc": 1.0,
+                    "delta": 0.0,
+                    "skip_reason": "",
+                },
+                {
+                    "source_idx": 1,
+                    "problem": "p1",
+                    "method": "skillrl",
+                    "teacher_backend": "server_teacher",
+                    "baseline_correct_count": 1,
+                    "baseline_rollout_count": 1,
+                    "baseline_acc": 1.0,
+                    "skill_correct_count": 1,
+                    "skill_rollout_count": 1,
+                    "skill_acc": 1.0,
+                    "delta": 0.0,
+                    "skip_reason": "",
+                },
+            ]
+            (out_dir / "details.jsonl").write_text(
+                "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in details),
+                encoding="utf-8",
+            )
+
+            args = mock.Mock(
+                trajectories=str(traj),
+                output_dir=str(out_dir),
+                method="skillrl",
+                sample_size=10,
+            )
+            status = resume_status(args)
+            self.assertTrue(status["complete"])
+            self.assertTrue(all(item["complete"] for item in status["statuses"]))
+
+    def test_resume_status_reports_incomplete_when_rollout_or_detail_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            traj = tmp / "traj.jsonl"
+            out_dir = tmp / "out"
+            row = {"idx": 1, "problem": "p1", "topic": "Math->A", "topic_key": "Math_A", "student_response": "good", "is_correct": True, "ground_truth": "1"}
+            traj.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            skill_path = out_dir / "generated_skills" / "skillrl" / "api_teacher.jsonl"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text(
+                json.dumps(
+                    {
+                        "source_idx": 1,
+                        "problem": "p1",
+                        "topic": "Math->A",
+                        "method": "skillrl",
+                        "teacher_backend": "api_teacher",
+                        "status": "ok",
+                        "skill_text": "cached skill",
+                    },
+                    ensure_ascii=False,
+                ) + "\n",
+                encoding="utf-8",
+            )
+
+            args = mock.Mock(
+                trajectories=str(traj),
+                output_dir=str(out_dir),
+                method="skillrl",
+                sample_size=10,
+            )
+            status = resume_status(args)
+            self.assertFalse(status["complete"])
+            self.assertTrue(any(not item["complete"] for item in status["statuses"]))

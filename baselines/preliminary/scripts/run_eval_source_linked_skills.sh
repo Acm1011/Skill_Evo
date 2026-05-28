@@ -72,10 +72,6 @@ if [[ -z "${MODEL}" || -z "${OUT_DIR}" ]]; then
   usage
   exit 1
 fi
-if [[ -z "${TEACHER_API_BASE_URL}" || -z "${TEACHER_API_MODEL}" ]]; then
-  echo "teacher api config is required" >&2
-  exit 1
-fi
 
 export PYTHONPATH="${REPO_ROOT}/Skill_Evo:${PYTHONPATH:-}"
 export SE_WORKING_DIR="${REPO_ROOT}/Skill_Evo"
@@ -89,6 +85,37 @@ export SE_ROLLOUT_N_SERVERS="${SE_N_GPUS}"
 export SE_ROLLOUT_LOG_DIR="${ROLLOUT_LOG_DIR}"
 
 mkdir -p "${OUT_DIR}" "${ROLLOUT_LOG_DIR}"
+
+if [[ "${RESUME}" -eq 1 ]]; then
+  set +e
+  RESUME_STATUS="$(
+    python -m baselines.preliminary.eval_source_linked_skills \
+      --trajectories "${TRAJ}" \
+      --output-dir "${OUT_DIR}" \
+      --method "${METHOD}" \
+      --sample-size "${SAMPLE_SIZE}" \
+      --resume-check-only
+  )"
+  RESUME_RC=$?
+  set -e
+  if [[ "${RESUME_RC}" -eq 0 ]]; then
+    echo "resume check: outputs already complete, skipping rollout server startup"
+    echo "${RESUME_STATUS}"
+    exit 0
+  fi
+  if [[ "${RESUME_RC}" -ne 10 ]]; then
+    echo "resume check failed" >&2
+    echo "${RESUME_STATUS}" >&2
+    exit "${RESUME_RC}"
+  fi
+  echo "resume check: outputs incomplete, continuing with rollout server startup"
+  echo "${RESUME_STATUS}"
+fi
+
+if [[ -z "${TEACHER_API_BASE_URL}" || -z "${TEACHER_API_MODEL}" ]]; then
+  echo "teacher api config is required" >&2
+  exit 1
+fi
 
 bash "${REPO_ROOT}/Skill_Evo/skill_src/Zero/start_rollout_servers.sh" --model "${MODEL}" &
 SERVER_PID=$!

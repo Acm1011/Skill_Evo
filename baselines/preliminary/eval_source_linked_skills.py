@@ -554,6 +554,66 @@ def _index_rollout_rows(rows: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[s
     return dict(out)
 
 
+def _expected_source_keys(questions: Sequence[Dict[str, Any]]) -> List[str]:
+    return [_resume_key(question["meta"]["source_idx"]) for question in questions]
+
+
+def resume_status(args: argparse.Namespace) -> Dict[str, Any]:
+    methods = _parse_methods(args.method)
+    trajectories = read_jsonl(args.trajectories)
+    questions = group_questions(trajectories, args.sample_size)
+    expected_keys = _expected_source_keys(questions)
+    expected_set = set(expected_keys)
+    output_dir = Path(args.output_dir)
+    details_rows = _read_jsonl_if_exists(output_dir / "details.jsonl")
+
+    statuses: List[Dict[str, Any]] = []
+    complete = True
+    for method in methods:
+        for teacher_backend in TEACHER_BACKENDS:
+            skill_rows = _read_jsonl_if_exists(output_dir / "generated_skills" / method / f"{teacher_backend}.jsonl")
+            rollout_rows = _read_jsonl_if_exists(output_dir / "student_rollout" / method / f"{teacher_backend}.jsonl")
+            method_details = [
+                row for row in details_rows
+                if row.get("method") == method and row.get("teacher_backend") == teacher_backend
+            ]
+            skill_by_source = _index_rows_by_source(skill_rows)
+            rollout_by_source = _index_rollout_rows(rollout_rows)
+            detail_by_source = _index_rows_by_source(method_details)
+
+            missing_skill = sorted(expected_set - set(skill_by_source.keys()))
+            missing_detail = sorted(expected_set - set(detail_by_source.keys()))
+            missing_rollout: List[str] = []
+            for source_key in expected_keys:
+                detail = detail_by_source.get(source_key)
+                if detail is None:
+                    continue
+                rollout_count = int(detail.get("skill_rollout_count") or 0)
+                if rollout_count > 0 and not rollout_by_source.get(source_key):
+                    missing_rollout.append(source_key)
+
+            backend_complete = not (missing_skill or missing_detail or missing_rollout)
+            complete = complete and backend_complete
+            statuses.append(
+                {
+                    "method": method,
+                    "teacher_backend": teacher_backend,
+                    "complete": backend_complete,
+                    "expected_questions": len(expected_keys),
+                    "missing_skill": missing_skill,
+                    "missing_detail": missing_detail,
+                    "missing_rollout": missing_rollout,
+                }
+            )
+
+    return {
+        "complete": complete,
+        "methods": methods,
+        "n_questions": len(expected_keys),
+        "statuses": statuses,
+    }
+
+
 def _parse_methods(raw: str) -> List[str]:
     value = (raw or "all").strip().lower()
     if value == "all":
@@ -746,12 +806,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--student-max-concurrent", type=int, default=0)
     p.add_argument("--eval-max-workers", type=int, default=0)
     p.add_argument("--resume", action="store_true", help="reuse existing generated_skills/student_rollout/details outputs when present")
+    p.add_argument("--resume-check-only", action="store_true", help="exit 0 if requested outputs are already complete; exit 10 otherwise")
     return p
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.resume_check_only:
+        status = resume_status(args)
+        print(json.dumps(status, ensure_ascii=False))
+        return 0 if status["complete"] else 10
     if not args.teacher_api_base_url or not args.teacher_api_model:
         raise SystemExit("teacher api config is required: --teacher-api-base-url and --teacher-api-model")
     if args.student_rollout_n <= 0:
