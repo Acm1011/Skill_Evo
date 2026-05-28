@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import random
@@ -337,6 +338,12 @@ def _write_summary(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     path.write_text(json.dumps(list(rows), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _default_eval_workers(*, n_gpus: int, requested: int) -> int:
+    if requested > 0:
+        return requested
+    return max(1, int(n_gpus))
+
+
 def evaluate_checkpoint(
     *,
     checkpoint: Dict[str, Any],
@@ -349,8 +356,14 @@ def evaluate_checkpoint(
     proc = manager.start(checkpoint)
     try:
         server_urls = _resolve_server_urls(args.rollout_host, args.rollout_base_port, args.n_gpus)
+        eval_workers = _default_eval_workers(
+            n_gpus=int(args.n_gpus),
+            requested=int(getattr(args, "eval_max_workers", 0) or 0),
+        )
         baseline_results: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        for question in questions:
+
+        def _baseline_task(item: Tuple[int, Dict[str, Any]]) -> Tuple[Tuple[str, str], Dict[str, Any]]:
+            _, question = item
             key = _question_lookup_key(question)
             baseline_rows, baseline_acc, baseline_correct = _run_prompt_rollout(
                 server_urls=server_urls,
@@ -359,17 +372,26 @@ def evaluate_checkpoint(
                 ground_truth=question["meta"]["ground_truth"],
                 args=args,
             )
-            baseline_results[key] = {
+            return key, {
                 "baseline_rows": baseline_rows,
                 "baseline_acc": baseline_acc,
                 "baseline_correct_count": baseline_correct,
                 "baseline_rollout_count": len(baseline_rows),
             }
 
+        with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
+            futures = [executor.submit(_baseline_task, item) for item in enumerate(questions)]
+            for future in concurrent.futures.as_completed(futures):
+                key, baseline = future.result()
+                baseline_results[key] = baseline
+
         details: List[Dict[str, Any]] = []
         attempt_rows: List[Dict[str, Any]] = []
         for (method, teacher_backend), mapping in sorted(skill_sets.items()):
-            for question in questions:
+            ordered_results: List[Tuple[int, Dict[str, Any], List[Dict[str, Any]]]] = []
+
+            def _skill_task(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any], List[Dict[str, Any]]]:
+                question_idx, question = item
                 meta = question["meta"]
                 qkey = _question_lookup_key(question)
                 baseline = baseline_results[qkey]
@@ -377,39 +399,33 @@ def evaluate_checkpoint(
                 if skill_row is None and qkey[0] == "source_idx":
                     skill_row = mapping.get(("problem", meta["problem"]))
                 if skill_row is None:
-                    details.append(
-                        {
-                            "checkpoint_name": checkpoint["checkpoint_name"],
-                            "checkpoint_path": checkpoint["checkpoint_path"],
-                            "checkpoint_order": checkpoint["checkpoint_order"],
-                            "source_idx": meta["source_idx"],
-                            "problem": meta["problem"],
-                            "method": method,
-                            "teacher_backend": teacher_backend,
-                            "baseline_acc": baseline["baseline_acc"],
-                            "skill_acc": None,
-                            "delta": None,
-                            "skip_reason": "missing_skill",
-                        }
-                    )
-                    continue
+                    return question_idx, {
+                        "checkpoint_name": checkpoint["checkpoint_name"],
+                        "checkpoint_path": checkpoint["checkpoint_path"],
+                        "checkpoint_order": checkpoint["checkpoint_order"],
+                        "source_idx": meta["source_idx"],
+                        "problem": meta["problem"],
+                        "method": method,
+                        "teacher_backend": teacher_backend,
+                        "baseline_acc": baseline["baseline_acc"],
+                        "skill_acc": None,
+                        "delta": None,
+                        "skip_reason": "missing_skill",
+                    }, []
                 if skill_row.get("status") != "ok":
-                    details.append(
-                        {
-                            "checkpoint_name": checkpoint["checkpoint_name"],
-                            "checkpoint_path": checkpoint["checkpoint_path"],
-                            "checkpoint_order": checkpoint["checkpoint_order"],
-                            "source_idx": meta["source_idx"],
-                            "problem": meta["problem"],
-                            "method": method,
-                            "teacher_backend": teacher_backend,
-                            "baseline_acc": baseline["baseline_acc"],
-                            "skill_acc": None,
-                            "delta": None,
-                            "skip_reason": str(skill_row.get("status") or "invalid_skill"),
-                        }
-                    )
-                    continue
+                    return question_idx, {
+                        "checkpoint_name": checkpoint["checkpoint_name"],
+                        "checkpoint_path": checkpoint["checkpoint_path"],
+                        "checkpoint_order": checkpoint["checkpoint_order"],
+                        "source_idx": meta["source_idx"],
+                        "problem": meta["problem"],
+                        "method": method,
+                        "teacher_backend": teacher_backend,
+                        "baseline_acc": baseline["baseline_acc"],
+                        "skill_acc": None,
+                        "delta": None,
+                        "skip_reason": str(skill_row.get("status") or "invalid_skill"),
+                    }, []
                 try:
                     prompt = _question_prompt(question, solve_template, str(skill_row.get("skill_text") or ""))
                     rows, skill_acc, skill_correct = _run_prompt_rollout(
@@ -420,24 +436,22 @@ def evaluate_checkpoint(
                         args=args,
                     )
                 except Exception as e:
-                    details.append(
-                        {
-                            "checkpoint_name": checkpoint["checkpoint_name"],
-                            "checkpoint_path": checkpoint["checkpoint_path"],
-                            "checkpoint_order": checkpoint["checkpoint_order"],
-                            "source_idx": meta["source_idx"],
-                            "problem": meta["problem"],
-                            "method": method,
-                            "teacher_backend": teacher_backend,
-                            "baseline_acc": baseline["baseline_acc"],
-                            "skill_acc": None,
-                            "delta": None,
-                            "skip_reason": f"student_error:{type(e).__name__}",
-                        }
-                    )
-                    continue
+                    return question_idx, {
+                        "checkpoint_name": checkpoint["checkpoint_name"],
+                        "checkpoint_path": checkpoint["checkpoint_path"],
+                        "checkpoint_order": checkpoint["checkpoint_order"],
+                        "source_idx": meta["source_idx"],
+                        "problem": meta["problem"],
+                        "method": method,
+                        "teacher_backend": teacher_backend,
+                        "baseline_acc": baseline["baseline_acc"],
+                        "skill_acc": None,
+                        "delta": None,
+                        "skip_reason": f"student_error:{type(e).__name__}",
+                    }, []
+                attempt_batch: List[Dict[str, Any]] = []
                 for row in rows:
-                    attempt_rows.append(
+                    attempt_batch.append(
                         {
                             "checkpoint_name": checkpoint["checkpoint_name"],
                             "checkpoint_path": checkpoint["checkpoint_path"],
@@ -451,25 +465,33 @@ def evaluate_checkpoint(
                             **row,
                         }
                     )
-                details.append(
-                    {
-                        "checkpoint_name": checkpoint["checkpoint_name"],
-                        "checkpoint_path": checkpoint["checkpoint_path"],
-                        "checkpoint_order": checkpoint["checkpoint_order"],
-                        "source_idx": meta["source_idx"],
-                        "problem": meta["problem"],
-                        "method": method,
-                        "teacher_backend": teacher_backend,
-                        "baseline_acc": baseline["baseline_acc"],
-                        "baseline_correct_count": baseline["baseline_correct_count"],
-                        "baseline_rollout_count": baseline["baseline_rollout_count"],
-                        "skill_acc": skill_acc,
-                        "skill_correct_count": skill_correct,
-                        "skill_rollout_count": len(rows),
-                        "delta": skill_acc - baseline["baseline_acc"],
-                        "skip_reason": "",
-                    }
-                )
+                return question_idx, {
+                    "checkpoint_name": checkpoint["checkpoint_name"],
+                    "checkpoint_path": checkpoint["checkpoint_path"],
+                    "checkpoint_order": checkpoint["checkpoint_order"],
+                    "source_idx": meta["source_idx"],
+                    "problem": meta["problem"],
+                    "method": method,
+                    "teacher_backend": teacher_backend,
+                    "baseline_acc": baseline["baseline_acc"],
+                    "baseline_correct_count": baseline["baseline_correct_count"],
+                    "baseline_rollout_count": baseline["baseline_rollout_count"],
+                    "skill_acc": skill_acc,
+                    "skill_correct_count": skill_correct,
+                    "skill_rollout_count": len(rows),
+                    "delta": skill_acc - baseline["baseline_acc"],
+                    "skip_reason": "",
+                }, attempt_batch
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
+                futures = [executor.submit(_skill_task, item) for item in enumerate(questions)]
+                for future in concurrent.futures.as_completed(futures):
+                    ordered_results.append(future.result())
+
+            ordered_results.sort(key=lambda item: item[0])
+            for _, detail, attempt_batch in ordered_results:
+                details.append(detail)
+                attempt_rows.extend(attempt_batch)
         return details, attempt_rows
     finally:
         manager.stop(proc)
@@ -538,6 +560,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-host", default=os.environ.get("SE_ROLLOUT_HOST", "127.0.0.1"))
     parser.add_argument("--rollout-base-port", type=int, default=int(os.environ.get("SE_ROLLOUT_BASE_PORT", "8760")))
     parser.add_argument("--rollout-health-timeout", type=int, default=240)
+    parser.add_argument("--eval-max-workers", type=int, default=0)
     return parser
 
 

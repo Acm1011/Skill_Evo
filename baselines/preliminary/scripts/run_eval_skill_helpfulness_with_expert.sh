@@ -5,62 +5,55 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 SKILLS_RUN_DIR=""
-CHECKPOINT_ROOT=""
 OUT_DIR=""
 TRAJ="${REPO_ROOT}/Skill_Evo/baselines/SkillRL/outputs/trajectories_from_merged_v1_v2.jsonl"
 SAMPLE_SIZE=5000
-CHECKPOINT_LIMIT=0
 METHODS=()
 TEACHER_BACKENDS=()
-STUDENT_ROLLOUT_N=4
+EXPERT_API_BASE_URL="${EVAL_TEACHER_API_BASE_URL:-}"
+EXPERT_API_MODEL="${EVAL_TEACHER_API_MODEL:-}"
+EXPERT_API_KEY="${EVAL_TEACHER_API_KEY:-}"
 EVAL_MAX_WORKERS="${EVAL_MAX_WORKERS:-0}"
-SE_GPU_IDS="${SE_GPU_IDS:-4,5,6,7}"
-SE_N_GPUS="${SE_N_GPUS:-4}"
-SE_ROLLOUT_HOST="${SE_ROLLOUT_HOST:-127.0.0.1}"
-SE_ROLLOUT_BASE_PORT="${SE_ROLLOUT_BASE_PORT:-8760}"
 
 usage() {
   cat <<EOF
-Usage: $0 --skills-run-dir <dir> --checkpoint-root <dir> --output-dir <dir> [options]
+Usage: $0 --skills-run-dir <dir> --output-dir <dir> [options]
 
 Options:
   --trajectories <path>
   --sample-size <n>
-  --checkpoint-limit <n>
   --methods <m1,m2,...>
   --teacher-backends <b1,b2,...>
-  --student-rollout-n <n>
+  --expert-api-base-url <url>
+  --expert-api-model <name>
+  --expert-api-key <key>
   --eval-max-workers <n>
-  --gpu-ids <ids>
-  --n-gpus <n>
-  --rollout-host <host>
-  --rollout-base-port <port>
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skills-run-dir) SKILLS_RUN_DIR="$2"; shift 2 ;;
-    --checkpoint-root) CHECKPOINT_ROOT="$2"; shift 2 ;;
     --output-dir) OUT_DIR="$2"; shift 2 ;;
     --trajectories) TRAJ="$2"; shift 2 ;;
     --sample-size) SAMPLE_SIZE="$2"; shift 2 ;;
-    --checkpoint-limit) CHECKPOINT_LIMIT="$2"; shift 2 ;;
     --methods) IFS=',' read -r -a METHODS <<< "$2"; shift 2 ;;
     --teacher-backends) IFS=',' read -r -a TEACHER_BACKENDS <<< "$2"; shift 2 ;;
-    --student-rollout-n) STUDENT_ROLLOUT_N="$2"; shift 2 ;;
+    --expert-api-base-url) EXPERT_API_BASE_URL="$2"; shift 2 ;;
+    --expert-api-model) EXPERT_API_MODEL="$2"; shift 2 ;;
+    --expert-api-key) EXPERT_API_KEY="$2"; shift 2 ;;
     --eval-max-workers) EVAL_MAX_WORKERS="$2"; shift 2 ;;
-    --gpu-ids) SE_GPU_IDS="$2"; shift 2 ;;
-    --n-gpus) SE_N_GPUS="$2"; shift 2 ;;
-    --rollout-host) SE_ROLLOUT_HOST="$2"; shift 2 ;;
-    --rollout-base-port) SE_ROLLOUT_BASE_PORT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-if [[ -z "${SKILLS_RUN_DIR}" || -z "${CHECKPOINT_ROOT}" || -z "${OUT_DIR}" ]]; then
+if [[ -z "${SKILLS_RUN_DIR}" || -z "${OUT_DIR}" ]]; then
   usage
+  exit 1
+fi
+if [[ -z "${EXPERT_API_BASE_URL}" || -z "${EXPERT_API_MODEL}" ]]; then
+  echo "expert api config is required" >&2
   exit 1
 fi
 
@@ -68,19 +61,15 @@ export PYTHONPATH="${REPO_ROOT}/Skill_Evo:${PYTHONPATH:-}"
 mkdir -p "${OUT_DIR}"
 
 CMD=(
-  python -m baselines.preliminary.eval_skill_drift_across_checkpoints
+  python -m baselines.preliminary.eval_skill_helpfulness_with_expert
   --skills-run-dir "${SKILLS_RUN_DIR}"
-  --checkpoint-root "${CHECKPOINT_ROOT}"
   --output-dir "${OUT_DIR}"
   --trajectories "${TRAJ}"
   --sample-size "${SAMPLE_SIZE}"
-  --checkpoint-limit "${CHECKPOINT_LIMIT}"
-  --student-rollout-n "${STUDENT_ROLLOUT_N}"
+  --expert-api-base-url "${EXPERT_API_BASE_URL}"
+  --expert-api-model "${EXPERT_API_MODEL}"
+  --expert-api-key "${EXPERT_API_KEY}"
   --eval-max-workers "${EVAL_MAX_WORKERS}"
-  --gpu-ids "${SE_GPU_IDS}"
-  --n-gpus "${SE_N_GPUS}"
-  --rollout-host "${SE_ROLLOUT_HOST}"
-  --rollout-base-port "${SE_ROLLOUT_BASE_PORT}"
 )
 
 if [[ ${#METHODS[@]} -gt 0 ]]; then

@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from baselines.ReasoningBankMath.io_utils import read_jsonl
 from baselines.preliminary.eval_skill_drift_across_checkpoints import (
+    _default_eval_workers,
     discover_checkpoints,
+    evaluate_checkpoint,
     load_skill_sets,
     run_eval,
 )
 
 
 class EvalSkillDriftAcrossCheckpointsTests(unittest.TestCase):
+    def test_default_eval_workers_uses_gpu_count(self) -> None:
+        self.assertEqual(_default_eval_workers(n_gpus=8, requested=0), 8)
+        self.assertEqual(_default_eval_workers(n_gpus=8, requested=3), 3)
+
     def test_discover_checkpoints_sorts_numeric_names(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -216,3 +224,86 @@ class EvalSkillDriftAcrossCheckpointsTests(unittest.TestCase):
             checkpoint_names = {row["checkpoint_name"] for row in cross_details}
             self.assertEqual(checkpoint_names, {"checkpoint-100", "checkpoint-200"})
 
+    def test_evaluate_checkpoint_runs_rollouts_concurrently(self) -> None:
+        checkpoint = {
+            "checkpoint_name": "checkpoint-100",
+            "checkpoint_path": "/tmp/checkpoint-100",
+            "checkpoint_order": 0,
+        }
+        questions = [
+            {
+                "meta": {
+                    "source_idx": 1,
+                    "problem": "p1",
+                    "ground_truth": "1",
+                }
+            },
+            {
+                "meta": {
+                    "source_idx": 2,
+                    "problem": "p2",
+                    "ground_truth": "2",
+                }
+            },
+        ]
+        skill_sets = {
+            ("skillrl", "api_teacher"): {
+                ("source_idx", "1"): {"status": "ok", "skill_text": "s1"},
+                ("source_idx", "2"): {"status": "ok", "skill_text": "s2"},
+            }
+        }
+        args = mock.Mock(
+            n_gpus=2,
+            rollout_host="127.0.0.1",
+            rollout_base_port=8760,
+            student_rollout_n=1,
+            student_temperature=0.7,
+            student_top_p=0.95,
+            student_top_k=50,
+            student_max_tokens=4096,
+            student_timeout=60.0,
+            rollout_health_timeout=10,
+            eval_max_workers=2,
+            repo_root="/tmp",
+            rollout_start_script="/tmp/start.sh",
+            rollout_log_root="/tmp/logs",
+            gpu_ids="0,1",
+        )
+
+        class FakeManager:
+            def __init__(self, _args) -> None:
+                pass
+
+            def start(self, _checkpoint):
+                return object()
+
+            def stop(self, _proc) -> None:
+                return None
+
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_rollout(*, server_urls, prompt, question, ground_truth, args):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return [{"attempt_idx": 0, "student_response": f"reasoning \\boxed{{{ground_truth}}}", "is_correct": True}], 1.0, 1
+
+        with mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.RolloutServerManager", FakeManager), \
+            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints._run_prompt_rollout", side_effect=fake_rollout):
+            details, attempts = evaluate_checkpoint(
+                checkpoint=checkpoint,
+                questions=questions,
+                skill_sets=skill_sets,
+                args=args,
+                solve_template="SKILL: {skill}\nQuestion: {question}",
+            )
+
+        self.assertEqual(len(details), 2)
+        self.assertEqual(len(attempts), 2)
+        self.assertGreaterEqual(max_active, 2)
