@@ -526,6 +526,34 @@ def _write_summary(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     path.write_text(json.dumps(list(rows), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _read_jsonl_if_exists(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    return read_jsonl(path)
+
+
+def _resume_key(source_idx: Any) -> str:
+    return str(source_idx)
+
+
+def _index_rows_by_source(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if "source_idx" not in row:
+            continue
+        out[_resume_key(row["source_idx"])] = row
+    return out
+
+
+def _index_rollout_rows(rows: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if "source_idx" not in row:
+            continue
+        out[_resume_key(row["source_idx"])].append(row)
+    return dict(out)
+
+
 def _parse_methods(raw: str) -> List[str]:
     value = (raw or "all").strip().lower()
     if value == "all":
@@ -605,25 +633,44 @@ def run_eval(args: argparse.Namespace) -> int:
         "solve": _load_text(_prompt_dir("solve")),
     }
     output_dir = Path(args.output_dir)
-    details_rows: List[Dict[str, Any]] = []
+    existing_details = _read_jsonl_if_exists(output_dir / "details.jsonl") if getattr(args, "resume", False) else []
+    details_rows: List[Dict[str, Any]] = [row for row in existing_details if row.get("method") not in set(methods)]
 
     for method in methods:
         for teacher_backend in TEACHER_BACKENDS:
+            skill_path = output_dir / "generated_skills" / method / f"{teacher_backend}.jsonl"
+            rollout_path = output_dir / "student_rollout" / method / f"{teacher_backend}.jsonl"
+            existing_skill_rows = _read_jsonl_if_exists(skill_path) if getattr(args, "resume", False) else []
+            existing_rollout_rows = _read_jsonl_if_exists(rollout_path) if getattr(args, "resume", False) else []
+            existing_method_details = [
+                row for row in existing_details
+                if row.get("method") == method and row.get("teacher_backend") == teacher_backend
+            ]
+            skill_by_source = _index_rows_by_source(existing_skill_rows)
+            rollout_by_source = _index_rollout_rows(existing_rollout_rows)
+            detail_by_source = _index_rows_by_source(existing_method_details)
+
             skill_rows: List[Dict[str, Any]] = []
             rollout_rows: List[Dict[str, Any]] = []
             ordered_results: List[Tuple[int, Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]] = []
+            pending_items: List[Tuple[int, Dict[str, Any]]] = []
 
-            def _process_question(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+            def _process_question(
+                item: Tuple[int, Dict[str, Any]],
+                preloaded_skill_row: Optional[Dict[str, Any]] = None,
+            ) -> Tuple[int, Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
                 question_idx, question = item
-                bound_teacher_urls = [teacher_pool.next_url()] if teacher_backend == "server_teacher" else teacher_urls
-                skill_row = generate_skill_for_question(
-                    question=question,
-                    method=method,
-                    teacher_backend=teacher_backend,
-                    args=args,
-                    teacher_urls=bound_teacher_urls,
-                    templates=templates,
-                )
+                skill_row = preloaded_skill_row
+                if skill_row is None:
+                    bound_teacher_urls = [teacher_pool.next_url()] if teacher_backend == "server_teacher" else teacher_urls
+                    skill_row = generate_skill_for_question(
+                        question=question,
+                        method=method,
+                        teacher_backend=teacher_backend,
+                        args=args,
+                        teacher_urls=bound_teacher_urls,
+                        templates=templates,
+                    )
                 bound_student_urls = [student_pool.next_url()]
                 per_attempt_rows, detail = run_student_rollout(
                     question=question,
@@ -634,8 +681,27 @@ def run_eval(args: argparse.Namespace) -> int:
                 )
                 return question_idx, skill_row, per_attempt_rows, detail
 
+            for item in enumerate(questions):
+                question_idx, question = item
+                source_key = _resume_key(question["meta"]["source_idx"])
+                existing_skill = skill_by_source.get(source_key)
+                existing_detail = detail_by_source.get(source_key)
+                existing_rollouts = rollout_by_source.get(source_key, [])
+                if existing_skill is None:
+                    pending_items.append(item)
+                    continue
+                if existing_detail is not None and (
+                    existing_rollouts or int(existing_detail.get("skill_rollout_count") or 0) == 0
+                ):
+                    ordered_results.append((question_idx, existing_skill, existing_rollouts, existing_detail))
+                    continue
+                pending_items.append(item)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
-                futures = [executor.submit(_process_question, item) for item in enumerate(questions)]
+                futures = []
+                for item in pending_items:
+                    source_key = _resume_key(item[1]["meta"]["source_idx"])
+                    futures.append(executor.submit(_process_question, item, skill_by_source.get(source_key)))
                 for future in concurrent.futures.as_completed(futures):
                     ordered_results.append(future.result())
 
@@ -645,8 +711,6 @@ def run_eval(args: argparse.Namespace) -> int:
                 rollout_rows.extend(per_attempt_rows)
                 details_rows.append(detail)
 
-            skill_path = output_dir / "generated_skills" / method / f"{teacher_backend}.jsonl"
-            rollout_path = output_dir / "student_rollout" / method / f"{teacher_backend}.jsonl"
             write_jsonl(skill_path, skill_rows)
             write_jsonl(rollout_path, rollout_rows)
 
@@ -681,6 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--student-max-retries", type=int, default=3)
     p.add_argument("--student-max-concurrent", type=int, default=0)
     p.add_argument("--eval-max-workers", type=int, default=0)
+    p.add_argument("--resume", action="store_true", help="reuse existing generated_skills/student_rollout/details outputs when present")
     return p
 
 

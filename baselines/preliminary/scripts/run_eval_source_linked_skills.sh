@@ -19,6 +19,7 @@ TEACHER_API_MODEL="${EVAL_TEACHER_API_MODEL:-}"
 TEACHER_API_KEY="${EVAL_TEACHER_API_KEY:-}"
 STUDENT_ROLLOUT_N=4
 EVAL_MAX_WORKERS="${EVAL_MAX_WORKERS:-0}"
+RESUME=0
 
 usage() {
   cat <<EOF
@@ -40,6 +41,7 @@ Options:
   --teacher-api-key <key>
   --student-rollout-n <n>
   --eval-max-workers <n>
+  --resume
 EOF
 }
 
@@ -60,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --teacher-api-key) TEACHER_API_KEY="$2"; shift 2 ;;
     --student-rollout-n) STUDENT_ROLLOUT_N="$2"; shift 2 ;;
     --eval-max-workers) EVAL_MAX_WORKERS="$2"; shift 2 ;;
+    --resume) RESUME=1; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
@@ -115,14 +118,22 @@ for ((i = 0; i < SE_ROLLOUT_N_SERVERS; i++)); do
   SERVER_URLS+=("http://${SE_ROLLOUT_HOST}:${port}")
 done
 
-python -m baselines.preliminary.eval_source_linked_skills \
-  --trajectories "${TRAJ}" \
-  --output-dir "${OUT_DIR}" \
-  --method "${METHOD}" \
-  --sample-size "${SAMPLE_SIZE}" \
-  --server-urls "${SERVER_URLS[@]}" \
-  --teacher-api-base-url "${TEACHER_API_BASE_URL}" \
-  --teacher-api-model "${TEACHER_API_MODEL}" \
-  --teacher-api-key "${TEACHER_API_KEY}" \
-  --student-rollout-n "${STUDENT_ROLLOUT_N}" \
+EVAL_CMD=(
+  python -m baselines.preliminary.eval_source_linked_skills
+  --trajectories "${TRAJ}"
+  --output-dir "${OUT_DIR}"
+  --method "${METHOD}"
+  --sample-size "${SAMPLE_SIZE}"
+  --server-urls "${SERVER_URLS[@]}"
+  --teacher-api-base-url "${TEACHER_API_BASE_URL}"
+  --teacher-api-model "${TEACHER_API_MODEL}"
+  --teacher-api-key "${TEACHER_API_KEY}"
+  --student-rollout-n "${STUDENT_ROLLOUT_N}"
   --eval-max-workers "${EVAL_MAX_WORKERS}"
+)
+
+if [[ "${RESUME}" -eq 1 ]]; then
+  EVAL_CMD+=(--resume)
+fi
+
+"${EVAL_CMD[@]}"

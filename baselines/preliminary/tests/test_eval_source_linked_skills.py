@@ -168,3 +168,75 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
 
             self.assertEqual(set(teacher_targets), {("http://127.0.0.1:8760",), ("http://127.0.0.1:8761",)})
             self.assertEqual(set(rollout_targets), {("http://127.0.0.1:8760",), ("http://127.0.0.1:8761",)})
+
+    def test_run_eval_resume_reuses_existing_skill_and_continues_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            traj = tmp / "traj.jsonl"
+            out_dir = tmp / "out"
+            rows = [
+                {"idx": 1, "problem": "p1", "topic": "Math->A", "topic_key": "Math_A", "student_response": "good", "is_correct": True, "ground_truth": "1"},
+            ]
+            traj.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+
+            skill_dir = out_dir / "generated_skills" / "skillrl"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            prebuilt_skill = {
+                "source_idx": 1,
+                "problem": "p1",
+                "topic": "Math->A",
+                "method": "skillrl",
+                "teacher_backend": "api_teacher",
+                "prompt_used": "cached",
+                "raw_teacher_output": "{}",
+                "parsed_skill": {"general_skills": []},
+                "status": "ok",
+                "skill_text": "cached skill",
+                "skip_reason": "",
+            }
+            (skill_dir / "api_teacher.jsonl").write_text(json.dumps(prebuilt_skill, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            args = mock.Mock(
+                trajectories=str(traj),
+                output_dir=str(out_dir),
+                method="skillrl",
+                sample_size=10,
+                server_urls=["http://127.0.0.1:8760"],
+                teacher_server_urls=["http://127.0.0.1:8760"],
+                served_model_name="",
+                teacher_api_base_url="http://api/v1",
+                teacher_api_model="model",
+                teacher_api_key="",
+                student_rollout_n=1,
+                teacher_temperature=0.2,
+                teacher_top_p=0.95,
+                teacher_top_k=50,
+                teacher_max_tokens=4096,
+                teacher_timeout=60.0,
+                student_temperature=0.7,
+                student_top_p=0.95,
+                student_max_tokens=4096,
+                student_timeout=60.0,
+                student_max_retries=1,
+                student_max_concurrent=0,
+                eval_max_workers=1,
+                resume=True,
+            )
+
+            def fail_teacher(*_args, **_kwargs):
+                raise AssertionError("teacher should not be called when cached skill exists")
+
+            def fake_rollout(**kwargs):
+                self.assertIn("cached skill", kwargs["prompt"])
+                return ["reasoning here \\boxed{1}"]
+
+            with mock.patch("baselines.preliminary.eval_source_linked_skills._call_api_teacher", side_effect=fail_teacher), \
+                mock.patch("baselines.preliminary.eval_source_linked_skills._call_server_teacher", side_effect=fail_teacher), \
+                mock.patch("baselines.preliminary.eval_source_linked_skills._rollout_prompt", side_effect=fake_rollout):
+                self.assertEqual(run_eval(args), 0)
+
+            skill_rows = read_jsonl(out_dir / "generated_skills" / "skillrl" / "api_teacher.jsonl")
+            self.assertEqual(skill_rows, [prebuilt_skill])
+            rollout_rows = read_jsonl(out_dir / "student_rollout" / "skillrl" / "api_teacher.jsonl")
+            self.assertEqual(len(rollout_rows), 1)
+            self.assertEqual(rollout_rows[0]["source_idx"], 1)
