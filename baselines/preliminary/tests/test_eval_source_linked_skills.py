@@ -330,6 +330,7 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
             status = resume_status(args)
             self.assertTrue(status["complete"])
             self.assertTrue(all(item["complete"] for item in status["statuses"]))
+            self.assertFalse(status["requires_server"])
 
     def test_resume_status_reports_incomplete_when_rollout_or_detail_missing(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -366,11 +367,69 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
             status = resume_status(args)
             self.assertFalse(status["complete"])
             self.assertTrue(any(not item["complete"] for item in status["statuses"]))
+            self.assertTrue(status["requires_server"])
+
+    def test_resume_status_detail_only_gap_does_not_require_server(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            traj = tmp / "traj.jsonl"
+            out_dir = tmp / "out"
+            row = {"idx": 1, "problem": "p1", "topic": "Math->A", "topic_key": "Math_A", "student_response": "good", "is_correct": True, "ground_truth": "1"}
+            traj.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            for teacher_backend in ("api_teacher", "server_teacher"):
+                skill_path = out_dir / "generated_skills" / "skillrl" / f"{teacher_backend}.jsonl"
+                skill_path.parent.mkdir(parents=True, exist_ok=True)
+                skill_path.write_text(
+                    json.dumps(
+                        {
+                            "source_idx": 1,
+                            "problem": "p1",
+                            "topic": "Math->A",
+                            "method": "skillrl",
+                            "teacher_backend": teacher_backend,
+                            "status": "ok",
+                            "skill_text": "cached skill",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                rollout_path = out_dir / "student_rollout" / "skillrl" / f"{teacher_backend}.jsonl"
+                rollout_path.parent.mkdir(parents=True, exist_ok=True)
+                rollout_path.write_text(
+                    json.dumps(
+                        {
+                            "source_idx": 1,
+                            "problem": "p1",
+                            "method": "skillrl",
+                            "teacher_backend": teacher_backend,
+                            "attempt_idx": 0,
+                            "student_response": "reasoning here \\boxed{1}",
+                            "is_correct": True,
+                            "ground_truth": "1",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+
+            args = mock.Mock(
+                trajectories=str(traj),
+                output_dir=str(out_dir),
+                method="skillrl",
+                sample_size=10,
+            )
+            status = resume_status(args)
+            self.assertFalse(status["complete"])
+            self.assertFalse(status["requires_server"])
+            self.assertTrue(all(not item["requires_server"] for item in status["statuses"]))
 
     def test_format_resume_status_summarizes_counts_only(self) -> None:
         text = format_resume_status(
             {
                 "complete": False,
+                "requires_server": False,
                 "methods": ["skillrl"],
                 "n_questions": 100,
                 "statuses": [
@@ -378,6 +437,7 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
                         "method": "skillrl",
                         "teacher_backend": "api_teacher",
                         "complete": False,
+                        "requires_server": False,
                         "missing_skill": ["1", "2", "3"],
                         "missing_detail": ["4"],
                         "missing_rollout": [],
@@ -389,3 +449,87 @@ class EvalSourceLinkedSkillsTests(unittest.TestCase):
         self.assertIn("missing_detail=1", text)
         self.assertIn("missing_rollout=0", text)
         self.assertNotIn('["1", "2", "3"]', text)
+
+    def test_run_eval_resume_rebuilds_detail_without_new_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            traj = tmp / "traj.jsonl"
+            out_dir = tmp / "out"
+            rows = [
+                {"idx": 1, "problem": "p1", "topic": "Math->A", "topic_key": "Math_A", "student_response": "good", "is_correct": True, "ground_truth": "1"},
+            ]
+            traj.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+
+            for teacher_backend in ("api_teacher", "server_teacher"):
+                skill_path = out_dir / "generated_skills" / "skillrl" / f"{teacher_backend}.jsonl"
+                skill_path.parent.mkdir(parents=True, exist_ok=True)
+                skill_path.write_text(
+                    json.dumps(
+                        {
+                            "source_idx": 1,
+                            "problem": "p1",
+                            "topic": "Math->A",
+                            "method": "skillrl",
+                            "teacher_backend": teacher_backend,
+                            "status": "ok",
+                            "skill_text": "cached skill",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                rollout_path = out_dir / "student_rollout" / "skillrl" / f"{teacher_backend}.jsonl"
+                rollout_path.parent.mkdir(parents=True, exist_ok=True)
+                rollout_path.write_text(
+                    json.dumps(
+                        {
+                            "source_idx": 1,
+                            "problem": "p1",
+                            "method": "skillrl",
+                            "teacher_backend": teacher_backend,
+                            "attempt_idx": 0,
+                            "student_response": "reasoning here \\boxed{1}",
+                            "is_correct": True,
+                            "ground_truth": "1",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+
+            args = mock.Mock(
+                trajectories=str(traj),
+                output_dir=str(out_dir),
+                method="skillrl",
+                sample_size=10,
+                server_urls=["http://127.0.0.1:8760"],
+                teacher_server_urls=["http://127.0.0.1:8760"],
+                served_model_name="",
+                teacher_api_base_url="http://api/v1",
+                teacher_api_model="model",
+                teacher_api_key="",
+                student_rollout_n=1,
+                teacher_temperature=0.2,
+                teacher_top_p=0.95,
+                teacher_top_k=50,
+                teacher_max_tokens=4096,
+                teacher_timeout=60.0,
+                student_temperature=0.7,
+                student_top_p=0.95,
+                student_max_tokens=4096,
+                student_timeout=60.0,
+                student_max_retries=1,
+                student_max_concurrent=0,
+                eval_max_workers=1,
+                resume=True,
+            )
+
+            def fail_rollout(**_kwargs):
+                raise AssertionError("rollout should not be called when only detail is missing")
+
+            with mock.patch("baselines.preliminary.eval_source_linked_skills._rollout_prompt", side_effect=fail_rollout):
+                self.assertEqual(run_eval(args), 0)
+
+            details = read_jsonl(out_dir / "details.jsonl")
+            self.assertEqual(len(details), 2)
+            self.assertTrue(all(row["skill_rollout_count"] == 1 for row in details))

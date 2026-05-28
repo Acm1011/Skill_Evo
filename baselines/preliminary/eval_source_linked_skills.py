@@ -482,6 +482,47 @@ def run_student_rollout(
     return rollout_rows, detail
 
 
+def _detail_from_existing_rollout(
+    *,
+    question: Dict[str, Any],
+    skill_row: Dict[str, Any],
+    rollout_rows: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    meta = question["meta"]
+    if skill_row["status"] != "ok":
+        return {
+            "source_idx": meta["source_idx"],
+            "problem": meta["problem"],
+            "method": skill_row["method"],
+            "teacher_backend": skill_row["teacher_backend"],
+            "baseline_correct_count": question["baseline_correct_count"],
+            "baseline_rollout_count": question["baseline_rollout_count"],
+            "baseline_acc": question["baseline_acc"],
+            "skill_correct_count": None,
+            "skill_rollout_count": 0,
+            "skill_acc": None,
+            "delta": None,
+            "skip_reason": skill_row.get("skip_reason") or skill_row["status"],
+        }
+    correct = sum(1 for row in rollout_rows if row.get("is_correct") is True)
+    rollout_count = len(rollout_rows)
+    skill_acc = (correct / rollout_count) if rollout_count else 0.0
+    return {
+        "source_idx": meta["source_idx"],
+        "problem": meta["problem"],
+        "method": skill_row["method"],
+        "teacher_backend": skill_row["teacher_backend"],
+        "baseline_correct_count": question["baseline_correct_count"],
+        "baseline_rollout_count": question["baseline_rollout_count"],
+        "baseline_acc": question["baseline_acc"],
+        "skill_correct_count": correct,
+        "skill_rollout_count": rollout_count,
+        "skill_acc": skill_acc,
+        "delta": skill_acc - question["baseline_acc"],
+        "skip_reason": "",
+    }
+
+
 def _summary(details: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     buckets: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for row in details:
@@ -569,6 +610,7 @@ def resume_status(args: argparse.Namespace) -> Dict[str, Any]:
 
     statuses: List[Dict[str, Any]] = []
     complete = True
+    requires_server = False
     for method in methods:
         for teacher_backend in TEACHER_BACKENDS:
             skill_rows = _read_jsonl_if_exists(output_dir / "generated_skills" / method / f"{teacher_backend}.jsonl")
@@ -593,12 +635,15 @@ def resume_status(args: argparse.Namespace) -> Dict[str, Any]:
                     missing_rollout.append(source_key)
 
             backend_complete = not (missing_skill or missing_detail or missing_rollout)
+            backend_requires_server = bool(missing_skill or missing_rollout)
             complete = complete and backend_complete
+            requires_server = requires_server or backend_requires_server
             statuses.append(
                 {
                     "method": method,
                     "teacher_backend": teacher_backend,
                     "complete": backend_complete,
+                    "requires_server": backend_requires_server,
                     "expected_questions": len(expected_keys),
                     "missing_skill": missing_skill,
                     "missing_detail": missing_detail,
@@ -608,6 +653,7 @@ def resume_status(args: argparse.Namespace) -> Dict[str, Any]:
 
     return {
         "complete": complete,
+        "requires_server": requires_server,
         "methods": methods,
         "n_questions": len(expected_keys),
         "statuses": statuses,
@@ -616,7 +662,7 @@ def resume_status(args: argparse.Namespace) -> Dict[str, Any]:
 
 def format_resume_status(status: Dict[str, Any]) -> str:
     lines = [
-        f"resume check: complete={status.get('complete')} methods={','.join(status.get('methods') or [])} n_questions={status.get('n_questions', 0)}"
+        f"resume check: complete={status.get('complete')} requires_server={status.get('requires_server')} methods={','.join(status.get('methods') or [])} n_questions={status.get('n_questions', 0)}"
     ]
     for item in status.get("statuses") or []:
         lines.append(
@@ -624,6 +670,7 @@ def format_resume_status(status: Dict[str, Any]) -> str:
             f" method={item.get('method')}"
             f" teacher_backend={item.get('teacher_backend')}"
             f" complete={item.get('complete')}"
+            f" requires_server={item.get('requires_server')}"
             f" missing_skill={len(item.get('missing_skill') or [])}"
             f" missing_detail={len(item.get('missing_detail') or [])}"
             f" missing_rollout={len(item.get('missing_rollout') or [])}"
@@ -772,6 +819,14 @@ def run_eval(args: argparse.Namespace) -> int:
                 ):
                     ordered_results.append((question_idx, existing_skill, existing_rollouts, existing_detail))
                     continue
+                if existing_rollouts:
+                    rebuilt_detail = _detail_from_existing_rollout(
+                        question=question,
+                        skill_row=existing_skill,
+                        rollout_rows=existing_rollouts,
+                    )
+                    ordered_results.append((question_idx, existing_skill, existing_rollouts, rebuilt_detail))
+                    continue
                 pending_items.append(item)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
@@ -833,7 +888,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.resume_check_only:
         status = resume_status(args)
         print(format_resume_status(status))
-        return 0 if status["complete"] else 10
+        if status["complete"]:
+            return 0
+        if not status["requires_server"]:
+            return 11
+        return 10
     if not args.teacher_api_base_url or not args.teacher_api_model:
         raise SystemExit("teacher api config is required: --teacher-api-base-url and --teacher-api-model")
     if args.student_rollout_n <= 0:

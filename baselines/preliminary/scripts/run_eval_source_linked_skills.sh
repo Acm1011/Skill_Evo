@@ -103,6 +103,26 @@ if [[ "${RESUME}" -eq 1 ]]; then
     echo "${RESUME_STATUS}"
     exit 0
   fi
+  if [[ "${RESUME_RC}" -eq 11 ]]; then
+    echo "resume check: outputs incomplete, but no rollout server is needed"
+    echo "${RESUME_STATUS}"
+    EVAL_CMD=(
+      python -m baselines.preliminary.eval_source_linked_skills
+      --trajectories "${TRAJ}"
+      --output-dir "${OUT_DIR}"
+      --method "${METHOD}"
+      --sample-size "${SAMPLE_SIZE}"
+      --server-urls "http://${SE_ROLLOUT_HOST}:${SE_ROLLOUT_BASE_PORT}"
+      --teacher-api-base-url "${TEACHER_API_BASE_URL}"
+      --teacher-api-model "${TEACHER_API_MODEL}"
+      --teacher-api-key "${TEACHER_API_KEY}"
+      --student-rollout-n "${STUDENT_ROLLOUT_N}"
+      --eval-max-workers "${EVAL_MAX_WORKERS}"
+      --resume
+    )
+    "${EVAL_CMD[@]}"
+    exit 0
+  fi
   if [[ "${RESUME_RC}" -ne 10 ]]; then
     echo "resume check failed" >&2
     echo "${RESUME_STATUS}" >&2
