@@ -101,6 +101,32 @@ def _extract_checkpoint_order(path: Path) -> Tuple[int, str]:
     return 10**18, text
 
 
+def _checkpoint_display_name(root: Path, path: Path) -> str:
+    try:
+        rel_parts = path.resolve().relative_to(root.resolve()).parts
+    except ValueError:
+        rel_parts = path.parts
+    if not rel_parts:
+        return path.name
+    for idx, part in enumerate(rel_parts):
+        if _extract_checkpoint_order(Path(part))[0] != 10**18:
+            suffix = rel_parts[idx:]
+            return "__".join(suffix)
+    return "__".join(rel_parts)
+
+
+def _checkpoint_sort_key(root: Path, path: Path) -> Tuple[int, str]:
+    try:
+        rel_parts = path.resolve().relative_to(root.resolve()).parts
+    except ValueError:
+        rel_parts = path.parts
+    for idx, part in enumerate(rel_parts):
+        order, _ = _extract_checkpoint_order(Path(part))
+        if order != 10**18:
+            return order, "__".join(rel_parts[idx:])
+    return _extract_checkpoint_order(path)
+
+
 def discover_checkpoints(root: str | Path, limit: int = 0) -> List[Dict[str, Any]]:
     root_path = Path(root)
     if not root_path.exists():
@@ -113,15 +139,16 @@ def discover_checkpoints(root: str | Path, limit: int = 0) -> List[Dict[str, Any
         if _looks_like_checkpoint_dir(path):
             candidates.append(path)
 
-    deduped = sorted({p.resolve() for p in candidates}, key=lambda p: (_extract_checkpoint_order(p), str(p)))
+    deduped = sorted({p.resolve() for p in candidates}, key=lambda p: (_checkpoint_sort_key(root_path, p), str(p)))
     out: List[Dict[str, Any]] = []
     for idx, path in enumerate(deduped):
+        sort_key = _checkpoint_sort_key(root_path, path)
         out.append(
             {
                 "checkpoint_path": str(path),
-                "checkpoint_name": path.name,
+                "checkpoint_name": _checkpoint_display_name(root_path, path),
                 "checkpoint_order": idx,
-                "_sort_key": _extract_checkpoint_order(path),
+                "_sort_key": sort_key,
             }
         )
     if limit > 0:
@@ -338,6 +365,81 @@ def _write_summary(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     path.write_text(json.dumps(list(rows), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _canonical_checkpoint_path(path: str | Path) -> str:
+    return str(Path(path).resolve())
+
+
+def _read_json_rows(path: Path) -> List[Dict[str, Any]]:
+    if path.suffix == ".jsonl":
+        return read_jsonl(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = [data]
+    else:
+        raise RuntimeError(f"unsupported JSON structure in {path}")
+    out: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise RuntimeError(f"expected object at {path}[{idx}]")
+        out.append(row)
+    return out
+
+
+def _first_existing_path(paths: Sequence[Path]) -> Optional[Path]:
+    for path in paths:
+        if path.is_file():
+            return path
+    return None
+
+
+def _load_resumable_outputs(output_dir: Path) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+    per_checkpoint_root = output_dir / "per_checkpoint"
+    if not per_checkpoint_root.is_dir():
+        return {}
+    resumable: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for child in sorted(per_checkpoint_root.iterdir()):
+        if not child.is_dir():
+            continue
+        summary_path = _first_existing_path([child / "summary.json"])
+        details_path = _first_existing_path([child / "details.jsonl", child / "details.json"])
+        attempts_path = _first_existing_path([child / "attempts.jsonl", child / "attempts.json"])
+        if summary_path is None or details_path is None:
+            continue
+        summary_rows = _read_json_rows(summary_path)
+        details_rows = _read_json_rows(details_path)
+        attempts_rows = _read_json_rows(attempts_path) if attempts_path is not None else []
+        checkpoint_path = ""
+        for row in summary_rows + details_rows + attempts_rows:
+            text = str(row.get("checkpoint_path") or "").strip()
+            if text:
+                checkpoint_path = _canonical_checkpoint_path(text)
+                break
+        if not checkpoint_path:
+            continue
+        resumable[checkpoint_path] = {
+            "summary": summary_rows,
+            "details": details_rows,
+            "attempts": attempts_rows,
+        }
+    return resumable
+
+
+def _normalized_checkpoint_rows(
+    rows: Sequence[Dict[str, Any]],
+    checkpoint: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["checkpoint_name"] = checkpoint["checkpoint_name"]
+        item["checkpoint_path"] = checkpoint["checkpoint_path"]
+        item["checkpoint_order"] = checkpoint["checkpoint_order"]
+        normalized.append(item)
+    return normalized
+
+
 def _default_eval_workers(*, n_gpus: int, requested: int) -> int:
     if requested > 0:
         return requested
@@ -509,8 +611,23 @@ def run_eval(args: argparse.Namespace) -> int:
     all_details: List[Dict[str, Any]] = []
     all_attempts: List[Dict[str, Any]] = []
     cross_summary: List[Dict[str, Any]] = []
+    resumable_outputs = _load_resumable_outputs(output_dir) if getattr(args, "resume", False) else {}
 
     for checkpoint in checkpoints:
+        checkpoint_path = _canonical_checkpoint_path(str(checkpoint["checkpoint_path"]))
+        existing = resumable_outputs.get(checkpoint_path)
+        if existing is not None:
+            details = _normalized_checkpoint_rows(existing["details"], checkpoint)
+            attempts = _normalized_checkpoint_rows(existing["attempts"], checkpoint)
+            summary = _normalized_checkpoint_rows(existing["summary"], checkpoint)
+            ckpt_dir = output_dir / "per_checkpoint" / checkpoint["checkpoint_name"]
+            write_jsonl(ckpt_dir / "details.jsonl", details)
+            write_jsonl(ckpt_dir / "attempts.jsonl", attempts)
+            _write_summary(ckpt_dir / "summary.json", summary)
+            all_details.extend(details)
+            all_attempts.extend(attempts)
+            cross_summary.extend(summary)
+            continue
         details, attempts = evaluate_checkpoint(
             checkpoint=checkpoint,
             questions=questions,
@@ -561,6 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-base-port", type=int, default=int(os.environ.get("SE_ROLLOUT_BASE_PORT", "8760")))
     parser.add_argument("--rollout-health-timeout", type=int, default=240)
     parser.add_argument("--eval-max-workers", type=int, default=0)
+    parser.add_argument("--resume", action="store_true")
     return parser
 
 

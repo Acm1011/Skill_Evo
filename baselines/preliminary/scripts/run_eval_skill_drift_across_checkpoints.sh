@@ -11,13 +11,14 @@ TRAJ="${REPO_ROOT}/Skill_Evo/baselines/SkillRL/outputs/trajectories_from_merged_
 SAMPLE_SIZE=5000
 CHECKPOINT_LIMIT=0
 METHODS=()
-TEACHER_BACKENDS=()
+TEACHER_BACKENDS=(server_teacher)
 STUDENT_ROLLOUT_N=4
 EVAL_MAX_WORKERS="${EVAL_MAX_WORKERS:-0}"
 SE_GPU_IDS="${SE_GPU_IDS:-4,5,6,7}"
 SE_N_GPUS="${SE_N_GPUS:-4}"
 SE_ROLLOUT_HOST="${SE_ROLLOUT_HOST:-127.0.0.1}"
 SE_ROLLOUT_BASE_PORT="${SE_ROLLOUT_BASE_PORT:-8760}"
+RESUME=0
 
 usage() {
   cat <<EOF
@@ -35,6 +36,7 @@ Options:
   --n-gpus <n>
   --rollout-host <host>
   --rollout-base-port <port>
+  --resume
 EOF
 }
 
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --n-gpus) SE_N_GPUS="$2"; shift 2 ;;
     --rollout-host) SE_ROLLOUT_HOST="$2"; shift 2 ;;
     --rollout-base-port) SE_ROLLOUT_BASE_PORT="$2"; shift 2 ;;
+    --resume) RESUME=1; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
@@ -88,6 +91,9 @@ if [[ ${#METHODS[@]} -gt 0 ]]; then
 fi
 if [[ ${#TEACHER_BACKENDS[@]} -gt 0 ]]; then
   CMD+=(--teacher-backends "${TEACHER_BACKENDS[@]}")
+fi
+if [[ "${RESUME}" == "1" ]]; then
+  CMD+=(--resume)
 fi
 
 "${CMD[@]}"
