@@ -617,4 +617,4 @@ class EvalSkillDriftAcrossCheckpointsTests(unittest.TestCase):
 
         self.assertEqual(killpg.call_args_list[0].args, (4321, signal.SIGTERM))
         self.assertEqual(killpg.call_args_list[1].args, (4321, signal.SIGKILL))
-        self.assertEqual(run_cmd.call_args.args[0], ["pkill", "python"])
+        self.assertEqual(run_cmd.call_args.args[0], ["pkill", "-f", "skill_src.solver_offline_rollout_server"])

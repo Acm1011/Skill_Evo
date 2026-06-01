@@ -354,7 +354,12 @@ class RolloutServerManager:
             except subprocess.TimeoutExpired:
                 pass
 
-        subprocess.run(["pkill", "python"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["pkill", "-f", "skill_src.solver_offline_rollout_server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
         deadline = time.time() + 30
         while time.time() < deadline:
