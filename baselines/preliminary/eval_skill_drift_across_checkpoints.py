@@ -8,6 +8,7 @@ import random
 import re
 import signal
 import subprocess
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -16,6 +17,10 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 import httpx
+try:
+    from tqdm.auto import tqdm as _tqdm
+except ImportError:
+    _tqdm = None
 
 from baselines.ReasoningBankMath.io_utils import read_jsonl, write_jsonl
 from baselines.SkillRL.student_rollout import grade_if_possible
@@ -24,6 +29,63 @@ from baselines.preliminary.eval_source_linked_skills import group_questions
 DEFAULT_TRAJECTORIES = "Skill_Evo/baselines/SkillRL/outputs/trajectories_from_merged_v1_v2.jsonl"
 METHODS = ("skillrl", "reasoningbank", "expelmath")
 TEACHER_BACKENDS = ("api_teacher", "server_teacher")
+
+
+class _ProgressBar:
+    def __init__(self, *, total: int, desc: str, leave: bool = True) -> None:
+        self.total = max(0, int(total))
+        self.desc = desc
+        self.leave = leave
+        self.count = 0
+        self._last_len = 0
+        self._use_tqdm = _tqdm is not None and sys.stderr.isatty()
+        self._bar = _tqdm(total=self.total, desc=self.desc, leave=self.leave, dynamic_ncols=True) if self._use_tqdm else None
+        if self._bar is None:
+            self._render()
+
+    def update(self, n: int = 1) -> None:
+        self.count = min(self.total, self.count + max(0, int(n)))
+        if self._bar is not None:
+            self._bar.update(n)
+            return
+        self._render()
+
+    def write(self, message: str) -> None:
+        if self._bar is not None:
+            self._bar.write(message)
+            return
+        if self._last_len:
+            sys.stderr.write("\r" + (" " * self._last_len) + "\r")
+            self._last_len = 0
+        sys.stderr.write(message.rstrip() + "\n")
+        sys.stderr.flush()
+        self._render()
+
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+            return
+        if self._last_len:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+            self._last_len = 0
+
+    def _render(self) -> None:
+        total = self.total or 1
+        width = 24
+        filled = int(width * self.count / total)
+        bar = "#" * filled + "-" * (width - filled)
+        pct = int(100 * self.count / total) if self.total else 100
+        line = f"{self.desc}: [{bar}] {self.count}/{self.total} ({pct}%)"
+        sys.stderr.write("\r" + line)
+        sys.stderr.flush()
+        self._last_len = len(line)
+
+    def __enter__(self) -> "_ProgressBar":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 def _prompt_dir() -> Path:
@@ -463,6 +525,7 @@ def evaluate_checkpoint(
             requested=int(getattr(args, "eval_max_workers", 0) or 0),
         )
         baseline_results: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        question_count = len(questions)
 
         def _baseline_task(item: Tuple[int, Dict[str, Any]]) -> Tuple[Tuple[str, str], Dict[str, Any]]:
             _, question = item
@@ -481,11 +544,13 @@ def evaluate_checkpoint(
                 "baseline_rollout_count": len(baseline_rows),
             }
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
-            futures = [executor.submit(_baseline_task, item) for item in enumerate(questions)]
-            for future in concurrent.futures.as_completed(futures):
-                key, baseline = future.result()
-                baseline_results[key] = baseline
+        with _ProgressBar(total=question_count, desc=f"{checkpoint['checkpoint_name']} baseline", leave=False) as progress:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
+                futures = [executor.submit(_baseline_task, item) for item in enumerate(questions)]
+                for future in concurrent.futures.as_completed(futures):
+                    key, baseline = future.result()
+                    baseline_results[key] = baseline
+                    progress.update(1)
 
         details: List[Dict[str, Any]] = []
         attempt_rows: List[Dict[str, Any]] = []
@@ -585,10 +650,13 @@ def evaluate_checkpoint(
                     "skip_reason": "",
                 }, attempt_batch
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
-                futures = [executor.submit(_skill_task, item) for item in enumerate(questions)]
-                for future in concurrent.futures.as_completed(futures):
-                    ordered_results.append(future.result())
+            desc = f"{checkpoint['checkpoint_name']} {method}/{teacher_backend}"
+            with _ProgressBar(total=question_count, desc=desc, leave=False) as progress:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=eval_workers) as executor:
+                    futures = [executor.submit(_skill_task, item) for item in enumerate(questions)]
+                    for future in concurrent.futures.as_completed(futures):
+                        ordered_results.append(future.result())
+                        progress.update(1)
 
             ordered_results.sort(key=lambda item: item[0])
             for _, detail, attempt_batch in ordered_results:
@@ -613,36 +681,41 @@ def run_eval(args: argparse.Namespace) -> int:
     cross_summary: List[Dict[str, Any]] = []
     resumable_outputs = _load_resumable_outputs(output_dir) if getattr(args, "resume", False) else {}
 
-    for checkpoint in checkpoints:
-        checkpoint_path = _canonical_checkpoint_path(str(checkpoint["checkpoint_path"]))
-        existing = resumable_outputs.get(checkpoint_path)
-        if existing is not None:
-            details = _normalized_checkpoint_rows(existing["details"], checkpoint)
-            attempts = _normalized_checkpoint_rows(existing["attempts"], checkpoint)
-            summary = _normalized_checkpoint_rows(existing["summary"], checkpoint)
+    with _ProgressBar(total=len(checkpoints), desc="checkpoints") as checkpoint_progress:
+        for checkpoint in checkpoints:
+            checkpoint_path = _canonical_checkpoint_path(str(checkpoint["checkpoint_path"]))
+            existing = resumable_outputs.get(checkpoint_path)
+            if existing is not None:
+                checkpoint_progress.write(f"[resume] reuse {checkpoint['checkpoint_name']}")
+                details = _normalized_checkpoint_rows(existing["details"], checkpoint)
+                attempts = _normalized_checkpoint_rows(existing["attempts"], checkpoint)
+                summary = _normalized_checkpoint_rows(existing["summary"], checkpoint)
+                ckpt_dir = output_dir / "per_checkpoint" / checkpoint["checkpoint_name"]
+                write_jsonl(ckpt_dir / "details.jsonl", details)
+                write_jsonl(ckpt_dir / "attempts.jsonl", attempts)
+                _write_summary(ckpt_dir / "summary.json", summary)
+                all_details.extend(details)
+                all_attempts.extend(attempts)
+                cross_summary.extend(summary)
+                checkpoint_progress.update(1)
+                continue
+            checkpoint_progress.write(f"[run] {checkpoint['checkpoint_name']}")
+            details, attempts = evaluate_checkpoint(
+                checkpoint=checkpoint,
+                questions=questions,
+                skill_sets=skill_sets,
+                args=args,
+                solve_template=solve_template,
+            )
             ckpt_dir = output_dir / "per_checkpoint" / checkpoint["checkpoint_name"]
             write_jsonl(ckpt_dir / "details.jsonl", details)
             write_jsonl(ckpt_dir / "attempts.jsonl", attempts)
+            summary = summarize_details(details)
             _write_summary(ckpt_dir / "summary.json", summary)
             all_details.extend(details)
             all_attempts.extend(attempts)
             cross_summary.extend(summary)
-            continue
-        details, attempts = evaluate_checkpoint(
-            checkpoint=checkpoint,
-            questions=questions,
-            skill_sets=skill_sets,
-            args=args,
-            solve_template=solve_template,
-        )
-        ckpt_dir = output_dir / "per_checkpoint" / checkpoint["checkpoint_name"]
-        write_jsonl(ckpt_dir / "details.jsonl", details)
-        write_jsonl(ckpt_dir / "attempts.jsonl", attempts)
-        summary = summarize_details(details)
-        _write_summary(ckpt_dir / "summary.json", summary)
-        all_details.extend(details)
-        all_attempts.extend(attempts)
-        cross_summary.extend(summary)
+            checkpoint_progress.update(1)
 
     write_jsonl(output_dir / "cross_checkpoint_details.jsonl", all_details)
     write_jsonl(output_dir / "cross_checkpoint_attempts.jsonl", all_attempts)
