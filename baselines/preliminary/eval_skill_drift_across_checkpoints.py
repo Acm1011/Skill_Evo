@@ -314,6 +314,7 @@ class RolloutServerManager:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
+            start_new_session=True,
         )
         urls = _resolve_server_urls(self.args.rollout_host, self.args.rollout_base_port, self.args.n_gpus)
         deadline = time.time() + self.args.rollout_health_timeout
@@ -327,14 +328,40 @@ class RolloutServerManager:
         raise RuntimeError(f"rollout health check timed out for {checkpoint['checkpoint_name']}")
 
     def stop(self, proc: subprocess.Popen[str]) -> None:
-        if proc.poll() is not None:
-            return
-        proc.terminate()
+        urls = _resolve_server_urls(self.args.rollout_host, self.args.rollout_base_port, self.args.n_gpus)
+        pgid: Optional[int]
         try:
-            proc.wait(timeout=15)
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            pgid = None
+
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+        try:
+            proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+
+        subprocess.run(["pkill", "python"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if not any(_check_health(url) for url in urls):
+                break
+            time.sleep(1)
+        time.sleep(3)
 
 
 def _run_prompt_rollout(

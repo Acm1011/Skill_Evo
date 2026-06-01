@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import signal
+import subprocess
 import tempfile
 import threading
 import time
@@ -11,6 +13,7 @@ from unittest import mock
 from baselines.ReasoningBankMath.io_utils import read_jsonl
 from baselines.preliminary.eval_skill_drift_across_checkpoints import (
     _default_eval_workers,
+    RolloutServerManager,
     discover_checkpoints,
     evaluate_checkpoint,
     load_skill_sets,
@@ -589,3 +592,29 @@ class EvalSkillDriftAcrossCheckpointsTests(unittest.TestCase):
         self.assertEqual(len(details), 2)
         self.assertEqual(len(attempts), 2)
         self.assertGreaterEqual(max_active, 2)
+
+    def test_rollout_server_manager_stop_kills_process_group(self) -> None:
+        args = mock.Mock(
+            repo_root="/tmp",
+            rollout_start_script="/tmp/start.sh",
+            rollout_log_root="/tmp/logs",
+            gpu_ids="0,1",
+            n_gpus=2,
+            rollout_host="127.0.0.1",
+            rollout_base_port=8760,
+            rollout_health_timeout=10,
+        )
+        manager = RolloutServerManager(args)
+        proc = mock.Mock(pid=1234)
+        proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="bash", timeout=20), None]
+
+        with mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.os.getpgid", return_value=4321), \
+            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.os.killpg") as killpg, \
+            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.subprocess.run") as run_cmd, \
+            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints._check_health", return_value=False), \
+            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.time.sleep"):
+            manager.stop(proc)
+
+        self.assertEqual(killpg.call_args_list[0].args, (4321, signal.SIGTERM))
+        self.assertEqual(killpg.call_args_list[1].args, (4321, signal.SIGKILL))
+        self.assertEqual(run_cmd.call_args.args[0], ["pkill", "python"])
