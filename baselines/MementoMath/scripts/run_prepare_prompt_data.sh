@@ -22,6 +22,8 @@ Required:
 Optional:
   --model-name <name>           Encoder name/path used during retriever training
   --device <name>               cuda/cpu, default auto
+  --score-batch-size <n>        Retriever scoring batch size, default 32
+  --max-length <n>              Tokenizer max length, default 256
   --temp-input <path>           Default: data/temp_data.jsonl
   --greedy-input <path>         Default: data/greedy_data.jsonl
   --out-dir <path>              Default: baselines/MementoMath/outputs/prepared
@@ -34,6 +36,8 @@ CASE_POOL=""
 MODEL_PATH=""
 MODEL_NAME="princeton-nlp/sup-simcse-roberta-base"
 DEVICE=""
+SCORE_BATCH_SIZE="32"
+MAX_LENGTH="256"
 TEMP_INPUT="${REPO_ROOT}/data/temp_data.jsonl"
 GREEDY_INPUT="${REPO_ROOT}/data/greedy_data.jsonl"
 OUT_DIR="${REPO_ROOT}/baselines/MementoMath/outputs/prepared"
@@ -46,6 +50,8 @@ while [[ $# -gt 0 ]]; do
     --model-path) MODEL_PATH="$2"; shift 2 ;;
     --model-name) MODEL_NAME="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
+    --score-batch-size) SCORE_BATCH_SIZE="$2"; shift 2 ;;
+    --max-length) MAX_LENGTH="$2"; shift 2 ;;
     --temp-input) TEMP_INPUT="$2"; shift 2 ;;
     --greedy-input) GREEDY_INPUT="$2"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
@@ -76,6 +82,8 @@ run_one() {
     --case-pool "${CASE_POOL}"
     --model-path "${MODEL_PATH}"
     --model-name "${MODEL_NAME}"
+    --score-batch-size "${SCORE_BATCH_SIZE}"
+    --max-length "${MAX_LENGTH}"
     --top-k "${TOP_K}"
     --data-source "${stem}"
     --output-jsonl "${OUT_DIR}/${stem}.jsonl"

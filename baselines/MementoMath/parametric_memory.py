@@ -16,8 +16,12 @@ class CaseRetriever:
         model_path: str,
         model_name: str = "princeton-nlp/sup-simcse-roberta-base",
         device: str | None = None,
+        score_batch_size: int = 32,
+        max_length: int = 256,
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.score_batch_size = max(1, int(score_batch_size))
+        self.max_length = max(8, int(max_length))
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=model_name)
         backbone = AutoModel.from_pretrained(pretrained_model_name_or_path=model_name)
         self.model = MemoryRetrieverClassifier(backbone).to(self.device)
@@ -26,15 +30,32 @@ class CaseRetriever:
 
     @torch.inference_mode()
     def _score_batch(self, natural: List[str], icl: List[str]) -> torch.Tensor:
-        t1 = self.tokenizer(icl, padding=True, truncation=True, return_tensors="pt")
-        t2 = self.tokenizer(natural, padding=True, truncation=True, return_tensors="pt")
+        t1 = self.tokenizer(
+            icl,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        t2 = self.tokenizer(
+            natural,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
         ids1, mask1 = t1["input_ids"].to(self.device), t1["attention_mask"].to(self.device)
         ids2, mask2 = t2["input_ids"].to(self.device), t2["attention_mask"].to(self.device)
         logits = self.model(ids1, mask1, ids2, mask2)
         return torch.softmax(logits, dim=1)[:, 1]
 
     def retrieve(self, natural_prompt: str, icl_pool: List[str], metadata: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        probs = self._score_batch([natural_prompt] * len(icl_pool), icl_pool)
+        prob_chunks: List[torch.Tensor] = []
+        for start in range(0, len(icl_pool), self.score_batch_size):
+            sub_pool = icl_pool[start : start + self.score_batch_size]
+            sub_nat = [natural_prompt] * len(sub_pool)
+            prob_chunks.append(self._score_batch(sub_nat, sub_pool).detach().cpu())
+        probs = torch.cat(prob_chunks, dim=0) if prob_chunks else torch.empty(0)
         results = []
         for i, (prompt, score, meta) in enumerate(zip(icl_pool, probs, metadata)):
             results.append(
@@ -85,9 +106,16 @@ def main() -> None:
     ap.add_argument("--query", required=True)
     ap.add_argument("--topk", type=int, default=5)
     ap.add_argument("--model-name", default="princeton-nlp/sup-simcse-roberta-base")
+    ap.add_argument("--score-batch-size", type=int, default=32)
+    ap.add_argument("--max-length", type=int, default=256)
     args = ap.parse_args()
 
-    retriever = CaseRetriever(model_path=args.model_path, model_name=args.model_name)
+    retriever = CaseRetriever(
+        model_path=args.model_path,
+        model_name=args.model_name,
+        score_batch_size=args.score_batch_size,
+        max_length=args.max_length,
+    )
     icl_pool, metadata = load_pool(args.pool_jsonl)
     ranked = retriever.retrieve(args.query, icl_pool, metadata)
     ranked.sort(key=lambda x: x["score"], reverse=True)

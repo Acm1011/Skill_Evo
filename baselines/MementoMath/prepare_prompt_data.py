@@ -125,6 +125,8 @@ def run_prepare_prompt_data(args: argparse.Namespace) -> int:
         model_path=args.model_path,
         model_name=args.model_name,
         device=args.device or None,
+        score_batch_size=args.score_batch_size,
+        max_length=args.max_length,
     )
 
     icl_pool: List[str] = []
@@ -272,6 +274,8 @@ def build_prepare_prompt_data_parser(sub: Any) -> None:
     p.add_argument("--model-path", required=True)
     p.add_argument("--model-name", default="princeton-nlp/sup-simcse-roberta-base")
     p.add_argument("--device", default="")
+    p.add_argument("--score-batch-size", type=int, default=32)
+    p.add_argument("--max-length", type=int, default=256)
     p.add_argument("--start", type=int, default=0)
     p.add_argument("--end", type=int, default=None)
     p.add_argument("--top-k", type=int, default=5)
