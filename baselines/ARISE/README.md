@@ -1,11 +1,45 @@
 # baselines/ARISE
 
-这个目录提供的是把 `ARISE` 的 skill library 适配到当前仓库 `baselines` 体系下的数据准备层，不迁移 `ARISE/verl`，训练仍然使用仓库根目录的 [`verl`](../../verl)。
+这个目录提供两类能力：
+
+- `DeepMath-103K.jsonl -> ARISE/verl` 原生训练 parquet
+- `ARISE` 的 skill library 适配到当前仓库 `baselines` 体系下的数据准备层
+
+如果你要从零复现 ARISE，先用这里的原始 parquet 生成脚本，再进入 [`ARISE`](../../ARISE) 目录用它自带的 `verl` 启动。
 
 当前覆盖两件事：
 
 - `DeepMath-103K.jsonl` + ARISE library checkpoint -> RL 训练用 `jsonl/parquet`
 - `temp_data.jsonl` / `greedy_data.jsonl` + ARISE library checkpoint -> 检索 top-k skills 后的 `*_skill.jsonl/parquet`
+
+## 从零训练：原始 DeepMath -> ARISE parquet
+
+```bash
+export PYTHONPATH=/path/to/Skill_Evo:$PYTHONPATH
+export DEEPMATH_JSONL=/home/ycy/sdi/data/DeepMath-103K.jsonl
+export OUT_PARQUET=baselines/ARISE/outputs/deepmath_raw_arise.parquet
+
+bash baselines/ARISE/scripts/prepare_raw_deepmath_parquet.sh
+```
+
+这一步不会注入任何外部 skill。
+它只做最小格式转换，使数据满足 `ARISE/verl` 默认输入契约：
+
+- `prompt`
+- `reward_model.ground_truth`
+- `data_source=math_dapo`
+- `extra_info`
+
+然后进入 `ARISE/` 目录训练：
+
+```bash
+cd ARISE
+export ARISE_MODEL_PATH=/path/to/model
+export ARISE_TRAIN_FILE=/path/to/Skill_Evo/baselines/ARISE/outputs/deepmath_raw_arise.parquet
+export ARISE_CKPTS_DIR=/path/to/checkpoints
+
+bash recipe/arise/run_arise_qwen3_4b.sh data.val_files=[]
+```
 
 ## 输入 skill library
 
