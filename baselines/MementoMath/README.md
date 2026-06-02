@@ -74,6 +74,7 @@ python -m baselines.MementoMath evolve-memory \
 - `retrieve.sh`：直接包装 `python -m baselines.MementoMath retrieve`
 - `run_build_training_data.sh`：直接包装 `python -m baselines.MementoMath build-training-data`
 - `run_train_retriever.sh`：调用 `baselines.MementoMath` 内置训练器训练 parametric retriever
+- `run_prepare_prompt_data.sh`：对 `temp_data.jsonl / greedy_data.jsonl` 检索 top-k skills，并生成 jsonl + parquet
 - `run_evolve_memory_with_rollout.sh`：自动启动 rollout server，增量更新 memory 库并导出新版本 case pool / dummy memory / embeddings
 
 示例：
@@ -115,6 +116,12 @@ bash baselines/MementoMath/scripts/run_train_retriever.sh \
   --train baselines/MementoMath/outputs/training_data.jsonl \
   --output-dir baselines/MementoMath/outputs/retriever_ckpts \
   --use-plan --save-best --fp16
+
+bash baselines/MementoMath/scripts/run_prepare_prompt_data.sh \
+  --memory-bank baselines/MementoMath/outputs/memory_bank.jsonl \
+  --case-pool baselines/MementoMath/outputs/memory.jsonl \
+  --model-path baselines/MementoMath/outputs/retriever_ckpts/best.pt \
+  --top-k 5
 
 bash baselines/MementoMath/scripts/run_evolve_memory_with_rollout.sh \
   --memory-bank baselines/MementoMath/outputs/memory_bank.jsonl \
