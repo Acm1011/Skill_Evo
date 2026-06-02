@@ -48,10 +48,10 @@ python -m baselines.MementoMath retrieve \
   --status success \
   --top-k 4
 
-python Memento/memory/train_memory_retriever.py \
+python -m baselines.MementoMath train-retriever \
   --train baselines/MementoMath/outputs/training_data.jsonl \
-  --output_dir baselines/MementoMath/outputs/retriever_ckpts \
-  --use_plan --save_best
+  --output-dir baselines/MementoMath/outputs/retriever_ckpts \
+  --use-plan --save-best
 
 python -m baselines.MementoMath evolve-memory \
   --memory-bank baselines/MementoMath/outputs/memory_bank.jsonl \
@@ -73,7 +73,7 @@ python -m baselines.MementoMath evolve-memory \
 - `build_embeddings.sh`：直接包装 `python -m baselines.MementoMath build-embeddings`
 - `retrieve.sh`：直接包装 `python -m baselines.MementoMath retrieve`
 - `run_build_training_data.sh`：直接包装 `python -m baselines.MementoMath build-training-data`
-- `run_train_retriever.sh`：调用原始 `Memento/memory/train_memory_retriever.py` 训练 parametric retriever
+- `run_train_retriever.sh`：调用 `baselines.MementoMath` 内置训练器训练 parametric retriever
 - `run_evolve_memory_with_rollout.sh`：自动启动 rollout server，增量更新 memory 库并导出新版本 case pool / dummy memory / embeddings
 
 示例：
@@ -159,3 +159,4 @@ bash baselines/MementoMath/scripts/run_evolve_memory_with_rollout.sh \
 - 检索默认用 embedding 相似度，并对同 topic / 同 status 做轻量加分
 - `evolve-memory` 支持增量加入新轨迹，并做去重合并
 - retriever 训练直接复用原始 `Memento` 的 `train_memory_retriever.py`，不训练 LLM 本体，只训练 case-selection 模型
+- 为了方便跨机器部署，训练与推理所需的 retriever 代码已内置到 `baselines/MementoMath`

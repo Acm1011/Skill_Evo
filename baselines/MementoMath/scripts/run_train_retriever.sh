@@ -110,42 +110,42 @@ mkdir -p "${OUTPUT_DIR}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 CMD=(
-  python Memento/memory/train_memory_retriever.py
+  python -m baselines.MementoMath train-retriever
   --train "${TRAIN}"
-  --output_dir "${OUTPUT_DIR}"
-  --pretrained_name "${PRETRAINED_NAME}"
+  --output-dir "${OUTPUT_DIR}"
+  --pretrained-name "${PRETRAINED_NAME}"
   --seed "${SEED}"
-  --val_ratio "${VAL_RATIO}"
-  --plan_style "${PLAN_STYLE}"
-  --batch_size "${BATCH_SIZE}"
+  --val-ratio "${VAL_RATIO}"
+  --plan-style "${PLAN_STYLE}"
+  --batch-size "${BATCH_SIZE}"
   --epochs "${EPOCHS}"
   --lr "${LR}"
-  --weight_decay "${WEIGHT_DECAY}"
-  --warmup_ratio "${WARMUP_RATIO}"
-  --max_len "${MAX_LEN}"
-  --grad_clip "${GRAD_CLIP}"
-  --eval_every "${EVAL_EVERY}"
+  --weight-decay "${WEIGHT_DECAY}"
+  --warmup-ratio "${WARMUP_RATIO}"
+  --max-len "${MAX_LEN}"
+  --grad-clip "${GRAD_CLIP}"
+  --eval-every "${EVAL_EVERY}"
 )
 if [[ -n "${VALID}" ]]; then
   CMD+=(--valid "${VALID}")
 fi
 if [[ -n "${PRETRAINED_LOCAL}" ]]; then
-  CMD+=(--pretrained_local "${PRETRAINED_LOCAL}")
+  CMD+=(--pretrained-local "${PRETRAINED_LOCAL}")
 fi
 if [[ "${NO_STRATIFY}" == "1" ]]; then
-  CMD+=(--no_stratify)
+  CMD+=(--no-stratify)
 fi
 if [[ "${USE_PLAN}" == "1" ]]; then
-  CMD+=(--use_plan)
+  CMD+=(--use-plan)
 fi
 if [[ "${FP16}" == "1" ]]; then
   CMD+=(--fp16)
 fi
 if [[ "${SAVE_BEST}" == "1" ]]; then
-  CMD+=(--save_best)
+  CMD+=(--save-best)
 fi
 if [[ -n "${CLASS_WEIGHT_POS}" ]]; then
-  CMD+=(--class_weight_pos "${CLASS_WEIGHT_POS}")
+  CMD+=(--class-weight-pos "${CLASS_WEIGHT_POS}")
 fi
 
 echo "[mmm-train-retriever] train: ${TRAIN}"
