@@ -12,6 +12,7 @@ from typing import Any
 
 
 DEFAULT_SKILLRL_OUTPUT_DIR = Path("/home/ycy/sdi/skill_saved/Skill_Evo/baseline/checkpoints/skillrl_qwen3_4b")
+DEFAULT_ARISE_OUTPUT_DIR = Path("/home/ycy/sdi/Skill_Evo/baselines/ARISE/outputs/prepared")
 
 
 def _add_skill_src_to_path() -> None:
@@ -191,6 +192,59 @@ class SkillRLAdapter:
         )
 
 
+class AriseAdapter:
+    name = "arise"
+
+    def __init__(
+        self,
+        bank: Any,
+        *,
+        retriever_url: str,
+        mode: str,
+        retrieve_lambda: float,
+        top_k: int,
+    ) -> None:
+        self.bank = bank
+        self.retriever_url = retriever_url
+        self.mode = mode
+        self.retrieve_lambda = float(retrieve_lambda)
+        self.top_k = max(1, int(top_k))
+
+    def retrieve(self, question: str, extra_info: dict[str, Any]) -> dict[str, Any]:
+        from baselines.SkillRL.prepare_rl_data import retrieve_bucket
+
+        candidates = self.bank.build_candidates()
+        retrieved_skills = retrieve_bucket(
+            question=question,
+            candidates=candidates,
+            top_k=self.top_k,
+            retriever_url=self.retriever_url,
+            mode=self.mode,
+            retrieve_lambda=self.retrieve_lambda,
+        )
+        return {
+            "retrieval_mode": self.mode,
+            "retriever_url": self.retriever_url,
+            "skill_candidates_count": len(candidates),
+            "retrieved_skills": list(retrieved_skills),
+        }
+
+    def render_skill_block(self, payload: dict[str, Any]) -> str:
+        from baselines.ARISE.skill_bank import format_skill_prompt
+
+        return format_skill_prompt(list(payload.get("retrieved_skills") or []))
+
+    def augment_extra_info(self, extra_info: dict[str, Any], payload: dict[str, Any]) -> None:
+        retrieved_skills = list(payload.get("retrieved_skills") or [])
+        extra_info["retrieval_mode"] = payload.get("retrieval_mode")
+        extra_info["retriever_url"] = payload.get("retriever_url")
+        extra_info["top_k"] = self.top_k
+        extra_info["skill_candidates_count"] = int(payload.get("skill_candidates_count") or 0)
+        extra_info["retrieved_skill_count"] = len(retrieved_skills)
+        extra_info["retrieved_skill_ids"] = [str(s.get("skill_id") or "") for s in retrieved_skills]
+        extra_info["skill_id"] = list(extra_info["retrieved_skill_ids"])
+
+
 def _process_one_file(
     input_path: Path,
     output_dir: Path,
@@ -340,6 +394,8 @@ def _resolve_output_dir(args: argparse.Namespace) -> Path:
         return Path(raw)
     if args.adapter == "skillrl":
         return DEFAULT_SKILLRL_OUTPUT_DIR
+    if args.adapter == "arise":
+        return DEFAULT_ARISE_OUTPUT_DIR
     raise ValueError("provide --output-dir when --adapter skill_evo")
 
 
@@ -357,6 +413,26 @@ def _build_adapter(args: argparse.Namespace) -> tuple[Any, Path]:
         )
         manager.load_jsonl(mem_path)
         return SkillEvoAdapter(manager, top_k=args.top_k), mem_path
+
+    if args.adapter == "arise":
+        from baselines.ARISE.skill_bank import AriseSkillBank
+
+        library_json = (args.library_json or "").strip()
+        if not library_json:
+            raise ValueError("provide --library-json when --adapter arise")
+        library_path = Path(library_json)
+        if not library_path.is_file():
+            raise FileNotFoundError(f"library file not found: {library_path}")
+        return (
+            AriseAdapter(
+                AriseSkillBank.from_path(library_path, include_reservoir=args.include_reservoir),
+                retriever_url=args.retriever_url,
+                mode=args.mode,
+                retrieve_lambda=args.retrieve_lambda,
+                top_k=args.top_k,
+            ),
+            library_path,
+        )
 
     from baselines.SkillRL.layered_skill_bank import LayeredSkillBank
     from baselines.SkillRL.prepare_rl_data import _prepare_candidates, retrieve_bucket
@@ -388,10 +464,11 @@ def _build_adapter(args: argparse.Namespace) -> tuple[Any, Path]:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--adapter", default="skill_evo", choices=["skill_evo", "skillrl"])
+    p.add_argument("--adapter", default="skill_evo", choices=["skill_evo", "skillrl", "arise"])
     p.add_argument("--memory-jsonl", default="", help="Path to memory_after_sol_vN.jsonl")
     p.add_argument("--memory-dir", default="", help="Directory to auto-find latest memory_after_sol_vN.jsonl")
     p.add_argument("--skills-json", default="", help="Path to SkillRL claude-style skill bank json")
+    p.add_argument("--library-json", default="", help="Path to ARISE skill library checkpoint json")
     p.add_argument("--inputs", nargs="+", required=True, help="Input jsonl files")
     p.add_argument("--output-dir", default="", help="Output directory")
     p.add_argument("--top-k", type=int, default=3, help="Retriever top_k; also used as skillrl general/task default")
@@ -401,6 +478,7 @@ def main() -> int:
     p.add_argument("--retriever-url", default="http://127.0.0.1:8766", help="SkillRL retriever url")
     p.add_argument("--mode", default="embedding", choices=["embedding", "hybrid"], help="SkillRL retriever mode")
     p.add_argument("--retrieve-lambda", type=float, default=0.5, help="SkillRL hybrid retrieve lambda")
+    p.add_argument("--include-reservoir", action="store_true", help="ARISE: also retrieve from reservoir")
     p.add_argument("--write-jsonl", action="store_true", help="Write *_skill.jsonl")
     p.add_argument("--write-parquet", action="store_true", help="Write *_skill.parquet")
     args = p.parse_args()
