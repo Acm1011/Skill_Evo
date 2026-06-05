@@ -138,6 +138,67 @@ class ExpeLMathAdapter(BaseAdapter):
         )
 
 
+class MementoMathAdapter(BaseAdapter):
+    source_name = "MementoMath"
+
+    def __init__(
+        self,
+        *,
+        memory_bank: Path,
+        embeddings: Path,
+        top_k: int,
+        backend: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float,
+        hash_dim: int,
+        topic_bonus: float,
+        same_status_bonus: float,
+    ) -> None:
+        from baselines.MementoMath.io_utils import read_jsonl
+        from baselines.MementoMath.retrieve_memory import format_retrieved_prompt, retrieve_records
+
+        self.source_path = memory_bank
+        self.embeddings_path = embeddings
+        self.top_k = max(1, int(top_k))
+        self.backend = backend
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model = model
+        self.timeout = float(timeout)
+        self.hash_dim = int(hash_dim)
+        self.topic_bonus = float(topic_bonus)
+        self.same_status_bonus = float(same_status_bonus)
+        self.memory_rows = read_jsonl(memory_bank)
+        self.embedding_rows = read_jsonl(embeddings)
+        self._retrieve_records = retrieve_records
+        self._format_retrieved_prompt = format_retrieved_prompt
+
+    def retrieve(self, question: str, topic: str) -> RetrievalResult:
+        scored = self._retrieve_records(
+            question=question,
+            memory_rows=self.memory_rows,
+            embedding_rows=self.embedding_rows,
+            top_k=self.top_k,
+            backend=self.backend,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            timeout=self.timeout,
+            hash_dim=self.hash_dim,
+            query_topic=topic,
+            topic_bonus=self.topic_bonus,
+            same_status_bonus=self.same_status_bonus,
+            status="",
+        )
+        rows = [row for row, _score in scored]
+        return RetrievalResult(
+            skill_block=self._format_retrieved_prompt(rows),
+            retrieved_ids=[str(row.get("memory_id") or "") for row in rows],
+        )
+
+
 class ReasoningBankMathAdapter(BaseAdapter):
     source_name = "ReasoningBankMath"
 
@@ -317,6 +378,44 @@ def _build_rbm_adapter(args: argparse.Namespace) -> ReasoningBankMathAdapter:
     )
 
 
+def _build_memento_adapter(args: argparse.Namespace) -> MementoMathAdapter:
+    memory_bank = Path(args.memento_memory_bank) if args.memento_memory_bank else None
+    if memory_bank is None:
+        memory_bank = _first_existing(
+            [
+                REPO_ROOT / "baselines" / "MementoMath" / "outputs" / "memory_bank_v2.jsonl",
+                REPO_ROOT / "baselines" / "MementoMath" / "outputs" / "memory_bank_v1_v2.jsonl",
+                REPO_ROOT / "baselines" / "MementoMath" / "outputs" / "memory_bank.jsonl",
+            ]
+        )
+    embeddings = Path(args.memento_embeddings) if args.memento_embeddings else None
+    if embeddings is None:
+        embeddings = _first_existing(
+            [
+                REPO_ROOT / "baselines" / "MementoMath" / "outputs" / "memory_embeddings_v2.jsonl",
+                REPO_ROOT / "baselines" / "MementoMath" / "outputs" / "memory_embeddings_v1_v2.jsonl",
+                REPO_ROOT / "baselines" / "MementoMath" / "outputs" / "memory_embeddings.jsonl",
+            ]
+        )
+    if memory_bank is None or not memory_bank.is_file():
+        raise FileNotFoundError("MementoMath memory bank not found; provide --memento-memory-bank")
+    if embeddings is None or not embeddings.is_file():
+        raise FileNotFoundError("MementoMath embeddings not found; provide --memento-embeddings")
+    return MementoMathAdapter(
+        memory_bank=memory_bank,
+        embeddings=embeddings,
+        top_k=args.top_k,
+        backend=args.memento_backend,
+        base_url=args.memento_embed_base_url,
+        api_key=args.memento_embed_api_key,
+        model=args.memento_embed_model,
+        timeout=args.memento_timeout,
+        hash_dim=args.memento_hash_dim,
+        topic_bonus=args.memento_topic_bonus,
+        same_status_bonus=args.memento_same_status_bonus,
+    )
+
+
 def _build_skillrl_adapter(args: argparse.Namespace) -> SkillRLAdapter:
     skills_json = Path(args.skillrl_skills_json) if args.skillrl_skills_json else None
     if skills_json is None:
@@ -342,6 +441,8 @@ def _build_adapter(source: str, args: argparse.Namespace) -> BaseAdapter:
     key = source.lower()
     if key == "expelmath":
         return _build_expel_adapter(args)
+    if key == "mementomath":
+        return _build_memento_adapter(args)
     if key == "reasoningbankmath":
         return _build_rbm_adapter(args)
     if key == "skillrl":
@@ -450,7 +551,7 @@ def _parse_args() -> argparse.Namespace:
         nargs="+",
         action="append",
         default=None,
-        choices=["ExpeLMath", "ReasoningBankMath", "SkillRL"],
+        choices=["ExpeLMath", "MementoMath", "ReasoningBankMath", "SkillRL"],
         help="Which memory sources to prepare",
     )
     p.add_argument(
@@ -482,6 +583,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--expel-hash-dim", type=int, default=256)
     p.add_argument("--expel-topic-bonus", type=float, default=0.05)
 
+    p.add_argument("--memento-memory-bank", default="")
+    p.add_argument("--memento-embeddings", default="")
+    p.add_argument("--memento-backend", default="hash", choices=["hash", "openai"])
+    p.add_argument("--memento-embed-base-url", default="")
+    p.add_argument("--memento-embed-api-key", default="")
+    p.add_argument("--memento-embed-model", default="")
+    p.add_argument("--memento-timeout", type=float, default=600.0)
+    p.add_argument("--memento-hash-dim", type=int, default=256)
+    p.add_argument("--memento-topic-bonus", type=float, default=0.05)
+    p.add_argument("--memento-same-status-bonus", type=float, default=0.02)
+
     p.add_argument("--rbm-memory-bank", default="")
     p.add_argument("--skillrl-skills-json", default="")
     return p.parse_args()
@@ -492,7 +604,7 @@ def main() -> int:
     if args.sources:
         args.sources = [item for group in args.sources for item in group]
     else:
-        args.sources = ["ExpeLMath", "ReasoningBankMath", "SkillRL"]
+        args.sources = ["ExpeLMath", "MementoMath", "ReasoningBankMath", "SkillRL"]
     source_data_root = Path(args.source_data_root)
     if not (source_data_root / "MMLU-Pro" / "data" / "test-00000-of-00001.parquet").is_file():
         print("[prepare_general_benchmark_data] missing MMLU-Pro test parquet", file=sys.stderr)

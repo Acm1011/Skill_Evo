@@ -8,11 +8,13 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 SOURCE_DATA_ROOT="/home/ycy/sdi/data"
 OUTPUT_DIR="${REPO_ROOT}/baselines/outputs/general_benchmark_data"
-SOURCES_CSV="ExpeLMath,ReasoningBankMath,SkillRL"
+SOURCES_CSV="ExpeLMath,MementoMath,ReasoningBankMath,SkillRL"
 
 EXPEL_MEMORY_BANK=""
 EXPEL_EMBEDDINGS=""
 RBM_MEMORY_BANK=""
+MEMENTO_MEMORY_BANK=""
+MEMENTO_EMBEDDINGS=""
 SKILLRL_SKILLS_JSON=""
 
 TOP_K="5"
@@ -31,7 +33,7 @@ Usage:
 Options:
   --source-data-root <path>      Root dir containing MMLU-Pro/ and SuperGPQA/
   --output-dir <path>            Output root dir
-  --sources <csv>                Comma-separated sources: ExpeLMath,ReasoningBankMath,SkillRL
+  --sources <csv>                Comma-separated sources: ExpeLMath,MementoMath,ReasoningBankMath,SkillRL
   --top-k <n>                    ExpeLMath / ReasoningBankMath top-k
   --top-k-general <n>            SkillRL general top-k
   --top-k-task <n>               SkillRL task top-k
@@ -42,6 +44,8 @@ Options:
   --expel-memory-bank <path>     Override ExpeLMath memory bank
   --expel-embeddings <path>      Override ExpeLMath embeddings
   --rbm-memory-bank <path>       Override ReasoningBankMath memory bank
+  --memento-memory-bank <path>   Override MementoMath memory bank
+  --memento-embeddings <path>    Override MementoMath embeddings
   --skillrl-skills-json <path>   Override SkillRL skills json
 
 Default output layout:
@@ -67,6 +71,8 @@ while [[ $# -gt 0 ]]; do
         --expel-memory-bank) EXPEL_MEMORY_BANK="$2"; shift 2 ;;
         --expel-embeddings) EXPEL_EMBEDDINGS="$2"; shift 2 ;;
         --rbm-memory-bank) RBM_MEMORY_BANK="$2"; shift 2 ;;
+        --memento-memory-bank) MEMENTO_MEMORY_BANK="$2"; shift 2 ;;
+        --memento-embeddings) MEMENTO_EMBEDDINGS="$2"; shift 2 ;;
         --skillrl-skills-json) SKILLRL_SKILLS_JSON="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "[run_prepare_general_benchmark_data] unknown arg: $1" >&2; usage; exit 2 ;;
@@ -95,6 +101,8 @@ done
 [[ -n "${EXPEL_MEMORY_BANK}" ]] && CMD+=(--expel-memory-bank "${EXPEL_MEMORY_BANK}")
 [[ -n "${EXPEL_EMBEDDINGS}" ]] && CMD+=(--expel-embeddings "${EXPEL_EMBEDDINGS}")
 [[ -n "${RBM_MEMORY_BANK}" ]] && CMD+=(--rbm-memory-bank "${RBM_MEMORY_BANK}")
+[[ -n "${MEMENTO_MEMORY_BANK}" ]] && CMD+=(--memento-memory-bank "${MEMENTO_MEMORY_BANK}")
+[[ -n "${MEMENTO_EMBEDDINGS}" ]] && CMD+=(--memento-embeddings "${MEMENTO_EMBEDDINGS}")
 [[ -n "${SKILLRL_SKILLS_JSON}" ]] && CMD+=(--skillrl-skills-json "${SKILLRL_SKILLS_JSON}")
 
 "${CMD[@]}"

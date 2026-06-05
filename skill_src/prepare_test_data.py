@@ -401,14 +401,14 @@ def _resolve_output_dir(args: argparse.Namespace) -> Path:
 
 def _build_adapter(args: argparse.Namespace) -> tuple[Any, Path]:
     if args.adapter == "skill_evo":
-        from skill_manager.skill_manager import DEFAULT_RETRIEVER_URL, SkillManager
+        from skill_manager.skill_manager import SkillManager
 
         mem_path = _resolve_skill_evo_memory_path(args)
         if not mem_path.is_file():
             raise FileNotFoundError(f"memory file not found: {mem_path}")
         manager = SkillManager(
             persist_path=mem_path,
-            retriever_url=DEFAULT_RETRIEVER_URL,
+            retriever_url=args.retriever_url,
             max_capacity=8192,
             retrieve_mode=args.skill_evo_mode,
         )
@@ -476,7 +476,11 @@ def main() -> int:
     p.add_argument("--top-k-general", type=int, default=None, help="SkillRL general skill top_k")
     p.add_argument("--top-k-task", type=int, default=None, help="SkillRL task skill top_k")
     p.add_argument("--top-k-mistake", type=int, default=2, help="SkillRL mistake top_k")
-    p.add_argument("--retriever-url", default="http://127.0.0.1:8766", help="SkillRL retriever url")
+    p.add_argument(
+        "--retriever-url",
+        default="http://127.0.0.1:8766",
+        help="Retriever url for skill_evo / skillrl / arise",
+    )
     p.add_argument(
         "--skill-evo-mode",
         default="hybrid",
