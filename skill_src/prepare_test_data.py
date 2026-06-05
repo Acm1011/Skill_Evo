@@ -410,6 +410,7 @@ def _build_adapter(args: argparse.Namespace) -> tuple[Any, Path]:
             persist_path=mem_path,
             retriever_url=DEFAULT_RETRIEVER_URL,
             max_capacity=8192,
+            retrieve_mode=args.skill_evo_mode,
         )
         manager.load_jsonl(mem_path)
         return SkillEvoAdapter(manager, top_k=args.top_k), mem_path
@@ -476,6 +477,12 @@ def main() -> int:
     p.add_argument("--top-k-task", type=int, default=None, help="SkillRL task skill top_k")
     p.add_argument("--top-k-mistake", type=int, default=2, help="SkillRL mistake top_k")
     p.add_argument("--retriever-url", default="http://127.0.0.1:8766", help="SkillRL retriever url")
+    p.add_argument(
+        "--skill-evo-mode",
+        default="hybrid",
+        choices=["embedding", "hybrid"],
+        help="SkillEvo retriever mode; default hybrid to preserve existing behavior",
+    )
     p.add_argument("--mode", default="embedding", choices=["embedding", "hybrid"], help="SkillRL retriever mode")
     p.add_argument("--retrieve-lambda", type=float, default=0.5, help="SkillRL hybrid retrieve lambda")
     p.add_argument("--include-reservoir", action="store_true", help="ARISE: also retrieve from reservoir")
