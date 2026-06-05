@@ -22,7 +22,9 @@ Required:
 Optional:
   --model-name <name>           Encoder name/path used during retriever training
   --device <name>               cuda/cpu, default auto
-  --score-batch-size <n>        Retriever scoring batch size, default 32
+  --devices <list>              Comma-separated devices, e.g. cuda:0,cuda:1
+  --prefer-multi-gpu            Auto-spread across all visible CUDA devices
+  --score-batch-size <n>        Retriever scoring batch size per worker, default 64
   --max-length <n>              Tokenizer max length, default 256
   --temp-input <path>           Default: data/temp_data.jsonl
   --greedy-input <path>         Default: data/greedy_data.jsonl
@@ -36,7 +38,9 @@ CASE_POOL=""
 MODEL_PATH=""
 MODEL_NAME="princeton-nlp/sup-simcse-roberta-base"
 DEVICE=""
-SCORE_BATCH_SIZE="32"
+DEVICES=""
+PREFER_MULTI_GPU="0"
+SCORE_BATCH_SIZE="64"
 MAX_LENGTH="256"
 TEMP_INPUT="${REPO_ROOT}/data/temp_data.jsonl"
 GREEDY_INPUT="${REPO_ROOT}/data/greedy_data.jsonl"
@@ -50,6 +54,8 @@ while [[ $# -gt 0 ]]; do
     --model-path) MODEL_PATH="$2"; shift 2 ;;
     --model-name) MODEL_NAME="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
+    --devices) DEVICES="$2"; shift 2 ;;
+    --prefer-multi-gpu) PREFER_MULTI_GPU="1"; shift 1 ;;
     --score-batch-size) SCORE_BATCH_SIZE="$2"; shift 2 ;;
     --max-length) MAX_LENGTH="$2"; shift 2 ;;
     --temp-input) TEMP_INPUT="$2"; shift 2 ;;
@@ -92,6 +98,12 @@ run_one() {
   )
   if [[ -n "${DEVICE}" ]]; then
     CMD+=(--device "${DEVICE}")
+  fi
+  if [[ -n "${DEVICES}" ]]; then
+    CMD+=(--devices "${DEVICES}")
+  fi
+  if [[ "${PREFER_MULTI_GPU}" == "1" ]]; then
+    CMD+=(--prefer-multi-gpu)
   fi
   "${CMD[@]}"
 }
