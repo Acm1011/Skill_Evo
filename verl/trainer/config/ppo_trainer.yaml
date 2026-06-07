@@ -223,6 +223,15 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
+  # Whether to notify the preliminary skill-utility evaluation server after checkpoint save
+  skill_utility_eval_enable: False
+
+  # HTTP endpoint of the async skill-utility evaluation server
+  skill_utility_eval_server_url: null
+
+  # Request timeout in seconds when sending the async trigger
+  skill_utility_eval_request_timeout: 3.0
+
   # whether to use legacy worker implementation
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto

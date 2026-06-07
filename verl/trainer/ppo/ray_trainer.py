@@ -26,6 +26,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Optional
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 import numpy as np
 import ray
@@ -823,6 +825,45 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+        return {
+            "global_step_folder": local_global_step_folder,
+            "actor_path": actor_local_path,
+            "global_step": self.global_steps,
+        }
+
+    def _maybe_trigger_skill_utility_eval(self, checkpoint_info: Optional[dict]) -> None:
+        if not checkpoint_info:
+            return
+        if not self.config.trainer.get("skill_utility_eval_enable", False):
+            return
+        server_url = str(self.config.trainer.get("skill_utility_eval_server_url", "") or "").strip()
+        if not server_url:
+            print("[skill_utility_eval] skipped: empty server url")
+            return
+
+        timeout = float(self.config.trainer.get("skill_utility_eval_request_timeout", 3.0))
+        payload = json.dumps(
+            {
+                "checkpoint_path": checkpoint_info["actor_path"],
+                "global_step": int(checkpoint_info["global_step"]),
+            }
+        ).encode("utf-8")
+        req = urlrequest.Request(
+            f"{server_url.rstrip('/')}/enqueue",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            print(
+                "[skill_utility_eval] trigger sent "
+                f"step={checkpoint_info['global_step']} actor_path={checkpoint_info['actor_path']} resp={body}"
+            )
+        except (urlerror.URLError, TimeoutError, ValueError) as exc:
+            print(f"[skill_utility_eval] trigger failed for step {checkpoint_info['global_step']}: {exc}")
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
@@ -1228,7 +1269,8 @@ class RayPPOTrainer:
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
-                        self._save_checkpoint()
+                        checkpoint_info = self._save_checkpoint()
+                    self._maybe_trigger_skill_utility_eval(checkpoint_info)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

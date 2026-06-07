@@ -6,7 +6,7 @@
 #   ./run_qwen3-8b.sh trainer.total_training_steps=10
 
 set -x
-CUDA_VISIBLE_DEVICES=0,1,2,3
+CUDA_VISIBLE_DEVICES="${TRAINING_CUDA_VISIBLE_DEVICES:-0,1}"
 export CUDA_VISIBLE_DEVICES
 
 # =============================================================================
@@ -19,6 +19,9 @@ VAL_FILES="/home/ycy/sdi/data/temp_data.parquet"
 MODEL_PATH="/home/ycy/sdi/models/Qwen3-4B-Instruct-2507"
 PROJECT_NAME='verl_grpo_qwen3_4b'
 EXPERIMENT_NAME='grpo_qwen3_4b'
+ENABLE_SKILL_UTILITY_EVAL="${ENABLE_SKILL_UTILITY_EVAL:-False}"
+SKILL_UTILITY_EVAL_SERVER_URL="${SKILL_UTILITY_EVAL_SERVER_URL:-http://127.0.0.1:8899}"
+SKILL_UTILITY_EVAL_TIMEOUT="${SKILL_UTILITY_EVAL_TIMEOUT:-3.0}"
 
 # =============================================================================
 # 数据
@@ -57,14 +60,14 @@ USE_KL_IN_REWARD=False
 # =============================================================================
 CRITIC_WARMUP=0
 TRAINER_LOGGER='["console","wandb","tensorboard"]'
-TOTAL_TRAINING_STEPS=200
 VAL_BEFORE_TRAIN=False
 # 须与 `CUDA_VISIBLE_DEVICES` 中可见卡数（或节点实际可用 GPU 数）一致
-N_GPUS_PER_NODE=4
+N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-2}"
 NNODES=1
-SAVE_FREQ=10
+SAVE_FREQ="${SAVE_FREQ:-20}"
 TEST_FREQ=10
 TOTAL_EPOCHS=15
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-300}"
 
 # =============================================================================
 cd "${WORK_DIR}"
@@ -109,4 +112,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes="${NNODES}" \
     trainer.save_freq="${SAVE_FREQ}" \
     trainer.test_freq=-1 \
-    trainer.total_epochs="${TOTAL_EPOCHS}" "$@"
+    trainer.total_epochs="${TOTAL_EPOCHS}" \
+    trainer.skill_utility_eval_enable="${ENABLE_SKILL_UTILITY_EVAL}" \
+    trainer.skill_utility_eval_server_url="${SKILL_UTILITY_EVAL_SERVER_URL}" \
+    trainer.skill_utility_eval_request_timeout="${SKILL_UTILITY_EVAL_TIMEOUT}" "$@"
