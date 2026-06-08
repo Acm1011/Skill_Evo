@@ -95,6 +95,7 @@ class JobState:
 class TriggerRequest:
     checkpoint_path: str
     global_step: int = 0
+    checkpoint_name: str = ""
     force: bool = False
 
     @classmethod
@@ -103,8 +104,14 @@ class TriggerRequest:
         if not checkpoint_path:
             raise ValueError("missing checkpoint_path")
         global_step = int(payload.get("global_step") or 0)
+        checkpoint_name = str(payload.get("checkpoint_name") or "").strip()
         force = bool(payload.get("force", False))
-        return cls(checkpoint_path=checkpoint_path, global_step=global_step, force=force)
+        return cls(
+            checkpoint_path=checkpoint_path,
+            global_step=global_step,
+            checkpoint_name=checkpoint_name,
+            force=force,
+        )
 
 
 class SkillUtilityEvalService:
@@ -134,7 +141,7 @@ class SkillUtilityEvalService:
         checkpoint_path = str(Path(request.checkpoint_path).resolve())
         if not Path(checkpoint_path).exists():
             raise ValueError(f"checkpoint_path does not exist: {checkpoint_path}")
-        checkpoint_name = _checkpoint_name(request.global_step, checkpoint_path)
+        checkpoint_name = str(request.checkpoint_name or "").strip() or _checkpoint_name(request.global_step, checkpoint_path)
         output_dir = self.output_root / "per_checkpoint" / checkpoint_name
         now = time.time()
         with self.lock:
