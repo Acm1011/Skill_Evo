@@ -22,6 +22,12 @@ TOP_K_GENERAL="5"
 TOP_K_TASK="5"
 TOP_K_MISTAKE="2"
 RETRIEVER_URL="http://127.0.0.1:8766"
+RETRIEVER_START_SCRIPT="${REPO_ROOT}/skill_src/Zero/start_retriever_server.sh"
+START_RETRIEVER="1"
+RETRIEVER_HOST=""
+RETRIEVER_PORT=""
+RETRIEVER_MAX_WAIT="120"
+RETRIEVER_DOC_CACHE_DIR=""
 MODE="embedding"
 RETRIEVE_LAMBDA="0.5"
 
@@ -39,6 +45,12 @@ Options:
   --top-k-task <n>               SkillRL task top-k
   --top-k-mistake <n>            SkillRL mistake top-k
   --retriever-url <url>          Retriever URL for ReasoningBankMath / SkillRL
+  --retriever-start-script <p>   Retriever startup script
+  --no-start-retriever           Assume retriever already running; skip startup/cleanup
+  --retriever-host <host>        Health-check host (default: from retriever-url)
+  --retriever-port <port>        Health-check port (default: from retriever-url)
+  --retriever-max-wait <sec>     Health-check timeout seconds
+  --retriever-doc-cache-dir <p>  Export RETRIEVER_DOC_CACHE_DIR before startup
   --mode <embedding|hybrid>      Retriever mode
   --retrieve-lambda <f>          Hybrid retrieve lambda
   --expel-memory-bank <path>     Override ExpeLMath memory bank
@@ -66,6 +78,12 @@ while [[ $# -gt 0 ]]; do
         --top-k-task) TOP_K_TASK="$2"; shift 2 ;;
         --top-k-mistake) TOP_K_MISTAKE="$2"; shift 2 ;;
         --retriever-url) RETRIEVER_URL="$2"; shift 2 ;;
+        --retriever-start-script) RETRIEVER_START_SCRIPT="$2"; shift 2 ;;
+        --no-start-retriever) START_RETRIEVER="0"; shift ;;
+        --retriever-host) RETRIEVER_HOST="$2"; shift 2 ;;
+        --retriever-port) RETRIEVER_PORT="$2"; shift 2 ;;
+        --retriever-max-wait) RETRIEVER_MAX_WAIT="$2"; shift 2 ;;
+        --retriever-doc-cache-dir) RETRIEVER_DOC_CACHE_DIR="$2"; shift 2 ;;
         --mode) MODE="$2"; shift 2 ;;
         --retrieve-lambda) RETRIEVE_LAMBDA="$2"; shift 2 ;;
         --expel-memory-bank) EXPEL_MEMORY_BANK="$2"; shift 2 ;;
@@ -80,6 +98,89 @@ while [[ $# -gt 0 ]]; do
 done
 
 IFS=',' read -r -a SOURCES <<< "${SOURCES_CSV}"
+
+if [[ -z "${RETRIEVER_HOST}" ]]; then
+    RETRIEVER_HOST="$(python - <<'PY' "${RETRIEVER_URL}"
+from urllib.parse import urlparse
+import sys
+u = urlparse(sys.argv[1])
+print(u.hostname or "127.0.0.1")
+PY
+)"
+fi
+
+if [[ -z "${RETRIEVER_PORT}" ]]; then
+    RETRIEVER_PORT="$(python - <<'PY' "${RETRIEVER_URL}"
+from urllib.parse import urlparse
+import sys
+u = urlparse(sys.argv[1])
+print(u.port or (443 if u.scheme == "https" else 80))
+PY
+)"
+fi
+
+needs_retriever=0
+for source in "${SOURCES[@]}"; do
+    case "${source}" in
+        ReasoningBankMath)
+            if (( TOP_K > 0 )); then
+                needs_retriever=1
+                break
+            fi
+            ;;
+        SkillRL)
+            if (( TOP_K_GENERAL > 0 || TOP_K_TASK > 0 || TOP_K_MISTAKE > 0 )); then
+                needs_retriever=1
+                break
+            fi
+            ;;
+    esac
+done
+
+RETRIEVER_LAUNCHER_PID=""
+
+cleanup() {
+    if [[ -n "${RETRIEVER_LAUNCHER_PID}" ]] && kill -0 "${RETRIEVER_LAUNCHER_PID}" 2>/dev/null; then
+        echo "[run_prepare_general_benchmark_data] stopping retriever..."
+        kill -TERM "${RETRIEVER_LAUNCHER_PID}" 2>/dev/null || true
+        wait "${RETRIEVER_LAUNCHER_PID}" 2>/dev/null || true
+    fi
+}
+
+if [[ "${needs_retriever}" == "1" && "${START_RETRIEVER}" == "1" ]]; then
+    if [[ ! -x "${RETRIEVER_START_SCRIPT}" ]]; then
+        echo "[run_prepare_general_benchmark_data] retriever start script missing or not executable: ${RETRIEVER_START_SCRIPT}" >&2
+        exit 1
+    fi
+    if [[ -n "${RETRIEVER_DOC_CACHE_DIR}" ]]; then
+        mkdir -p "${RETRIEVER_DOC_CACHE_DIR}"
+        export RETRIEVER_DOC_CACHE_DIR
+        export SE_RETRIEVER_DOC_CACHE_DIR="${RETRIEVER_DOC_CACHE_DIR}"
+        echo "[run_prepare_general_benchmark_data] retriever doc cache dir: ${RETRIEVER_DOC_CACHE_DIR}"
+    fi
+    trap cleanup EXIT
+    echo "[run_prepare_general_benchmark_data] starting retriever..."
+    bash "${RETRIEVER_START_SCRIPT}" &
+    RETRIEVER_LAUNCHER_PID=$!
+
+    echo "[run_prepare_general_benchmark_data] waiting for retriever health check..."
+    HEALTH_URL="http://${RETRIEVER_HOST}:${RETRIEVER_PORT}/health"
+    for _ in $(seq 1 "${RETRIEVER_MAX_WAIT}"); do
+        if curl -fsS "${HEALTH_URL}" >/dev/null 2>&1; then
+            echo "[run_prepare_general_benchmark_data] retriever healthy: ${HEALTH_URL}"
+            break
+        fi
+        sleep 1
+    done
+    if ! curl -fsS "${HEALTH_URL}" >/dev/null 2>&1; then
+        echo "[run_prepare_general_benchmark_data] retriever health check failed: ${HEALTH_URL}" >&2
+        exit 1
+    fi
+elif [[ "${needs_retriever}" == "1" ]]; then
+    echo "[run_prepare_general_benchmark_data] retriever required; assuming existing server at ${RETRIEVER_URL}"
+else
+    echo "[run_prepare_general_benchmark_data] retriever not needed for sources=${SOURCES_CSV}; skip startup"
+fi
 
 CMD=(
     python baselines/prepare_general_benchmark_data.py
