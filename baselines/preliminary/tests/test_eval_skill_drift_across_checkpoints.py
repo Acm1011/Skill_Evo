@@ -22,6 +22,25 @@ from baselines.preliminary.eval_skill_drift_across_checkpoints import (
 
 
 class EvalSkillDriftAcrossCheckpointsTests(unittest.TestCase):
+    def test_rollout_server_manager_resolves_repo_root_from_repo_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "Skill_Evo"
+            (root / "skill_src").mkdir(parents=True)
+            (root / "baselines").mkdir()
+            args = mock.Mock(repo_root=str(root), rollout_start_script=str(root / "skill_src" / "Zero" / "start_rollout_servers.sh"))
+            mgr = RolloutServerManager(args)
+            self.assertEqual(mgr.repo_root.resolve(), root.resolve())
+
+    def test_rollout_server_manager_resolves_repo_root_from_parent_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            parent = Path(td)
+            root = parent / "Skill_Evo"
+            (root / "skill_src").mkdir(parents=True)
+            (root / "baselines").mkdir()
+            args = mock.Mock(repo_root=str(parent), rollout_start_script=str(root / "skill_src" / "Zero" / "start_rollout_servers.sh"))
+            mgr = RolloutServerManager(args)
+            self.assertEqual(mgr.repo_root.resolve(), root.resolve())
+
     def test_default_eval_workers_uses_gpu_count(self) -> None:
         self.assertEqual(_default_eval_workers(n_gpus=8, requested=0), 8)
         self.assertEqual(_default_eval_workers(n_gpus=8, requested=3), 3)
@@ -594,27 +613,31 @@ class EvalSkillDriftAcrossCheckpointsTests(unittest.TestCase):
         self.assertGreaterEqual(max_active, 2)
 
     def test_rollout_server_manager_stop_kills_process_group(self) -> None:
-        args = mock.Mock(
-            repo_root="/tmp",
-            rollout_start_script="/tmp/start.sh",
-            rollout_log_root="/tmp/logs",
-            gpu_ids="0,1",
-            n_gpus=2,
-            rollout_host="127.0.0.1",
-            rollout_base_port=8760,
-            rollout_health_timeout=10,
-        )
-        manager = RolloutServerManager(args)
-        proc = mock.Mock(pid=1234)
-        proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="bash", timeout=20), None]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "Skill_Evo"
+            (root / "skill_src").mkdir(parents=True)
+            (root / "baselines").mkdir()
+            args = mock.Mock(
+                repo_root=str(root),
+                rollout_start_script=str(root / "skill_src" / "Zero" / "start.sh"),
+                rollout_log_root="/tmp/logs",
+                gpu_ids="0,1",
+                n_gpus=2,
+                rollout_host="127.0.0.1",
+                rollout_base_port=8760,
+                rollout_health_timeout=10,
+            )
+            manager = RolloutServerManager(args)
+            proc = mock.Mock(pid=1234)
+            proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="bash", timeout=20), None]
 
-        with mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.os.getpgid", return_value=4321), \
-            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.os.killpg") as killpg, \
-            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.subprocess.run") as run_cmd, \
-            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints._check_health", return_value=False), \
-            mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.time.sleep"):
-            manager.stop(proc)
+            with mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.os.getpgid", return_value=4321), \
+                mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.os.killpg") as killpg, \
+                mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.subprocess.run") as run_cmd, \
+                mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints._check_health", return_value=False), \
+                mock.patch("baselines.preliminary.eval_skill_drift_across_checkpoints.time.sleep"):
+                manager.stop(proc)
 
-        self.assertEqual(killpg.call_args_list[0].args, (4321, signal.SIGTERM))
-        self.assertEqual(killpg.call_args_list[1].args, (4321, signal.SIGKILL))
-        self.assertEqual(run_cmd.call_args.args[0], ["pkill", "-f", "skill_src.solver_offline_rollout_server"])
+            self.assertEqual(killpg.call_args_list[0].args, (4321, signal.SIGTERM))
+            self.assertEqual(killpg.call_args_list[1].args, (4321, signal.SIGKILL))
+            self.assertEqual(run_cmd.call_args.args[0], ["pkill", "-f", "skill_src.solver_offline_rollout_server"])

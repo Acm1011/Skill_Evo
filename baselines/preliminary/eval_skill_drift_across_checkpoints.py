@@ -290,15 +290,31 @@ def _rollout_prompt(
 class RolloutServerManager:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.repo_root = Path(args.repo_root).resolve()
+        self.repo_root = self._resolve_repo_root(Path(args.repo_root).resolve())
         self.script = Path(args.rollout_start_script).resolve()
+
+    @staticmethod
+    def _resolve_repo_root(path: Path) -> Path:
+        candidates = [path, path / "Skill_Evo"]
+        seen = set()
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if (candidate / "skill_src").is_dir() and (candidate / "baselines").is_dir():
+                return candidate
+        raise FileNotFoundError(
+            f"could not resolve Skill_Evo repo root from {path}; "
+            "expected either <repo>/skill_src or <parent>/Skill_Evo/skill_src"
+        )
 
     def start(self, checkpoint: Dict[str, Any]) -> subprocess.Popen[str]:
         log_dir = Path(self.args.rollout_log_root) / checkpoint["checkpoint_name"]
         log_dir.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
-        env["PYTHONPATH"] = f"{self.repo_root / 'Skill_Evo'}:{env.get('PYTHONPATH', '')}".rstrip(":")
-        env["SE_WORKING_DIR"] = str(self.repo_root / "Skill_Evo")
+        env["PYTHONPATH"] = f"{self.repo_root}:{env.get('PYTHONPATH', '')}".rstrip(":")
+        env["SE_WORKING_DIR"] = str(self.repo_root)
         env["SE_PROJECT_NAME"] = "Skill_Evo"
         env["SE_GPU_IDS"] = self.args.gpu_ids
         env["SE_N_GPUS"] = str(self.args.n_gpus)
@@ -309,7 +325,7 @@ class RolloutServerManager:
         env["SE_ROLLOUT_MODEL"] = checkpoint["checkpoint_path"]
         proc = subprocess.Popen(
             ["bash", str(self.script), "--model", checkpoint["checkpoint_path"]],
-            cwd=str(self.repo_root / "Skill_Evo"),
+            cwd=str(self.repo_root),
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
