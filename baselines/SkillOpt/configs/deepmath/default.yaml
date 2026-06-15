@@ -1,0 +1,20 @@
+_base_: ../_base_/default.yaml
+
+train:
+  train_size: 0
+  batch_size: 32
+  accumulation: 1
+
+env:
+  name: deepmath
+  skill_init: skillopt/envs/deepmath/skills/initial.md
+  split_mode: ratio
+  split_ratio: 8:1:1
+  split_dir: ""
+  data_path: ../SkillRL/outputs/trajectories_from_merged_v1_v2.jsonl
+  split_output_dir: ""
+  max_completion_tokens: 4096
+  exec_timeout: 600
+  task_timeout: 900
+  workers: 32
+  limit: 0
